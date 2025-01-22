@@ -5,7 +5,7 @@ import subprocess
 import os
 
 os.environ['DISPLAY'] = ':0'
-pygame.mixer.init()
+#pygame.mixer.init()
 # GDSClientLinux 실행 함수
 def run_command(args):
     try:
