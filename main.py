@@ -8,12 +8,18 @@ import stat  # 실행 권한 체크를 위해 필요
 
 os.environ['DISPLAY'] = ':0'
 
-# TFTP 서버 루트 디렉토리
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# 1) GDSClientLinux의 절대 경로 설정 (예시: Ubuntu x86_64 환경)
+#    실제 설치된 경로에 맞추어 수정하세요.
+GDSCLIENT_PATH = "/home/gdseng/GDS_Release_20250110/GDSClientLinux"
+
+# 2) TFTP 서버 루트 디렉토리(예: /srv/tftp)
 TFTP_ROOT_DIR = "/srv/tftp"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 def run_command(args):
     """
-    터미널 명령어를 실행하고 결과(표준출력)를 로그창에 보여준다.
+    subprocess.check_output로 명령을 실행하고 결과를 로그창에 표시.
     오류 발생 시 로그창에 오류 내용을 표시한다.
     """
     try:
@@ -24,20 +30,19 @@ def run_command(args):
 
 def ensure_gdsclientlinux_executable():
     """
-    GDSClientLinux 파일이 현재 디렉토리에 있는지, 실행 권한이 있는지 확인하고,
-    없다면 안내 메시지 또는 자동으로 chmod +x를 수행한다.
+    GDSClientLinux 절대 경로가 존재하는지, 실행 권한이 있는지 확인.
+    없다면 오류 메시지를 표시하거나 자동으로 chmod +x를 수행한다.
     """
-    gds_path = "./GDSClientLinux"
-    if not os.path.isfile(gds_path):
-        log_text.insert(tk.END, "[오류] GDSClientLinux 파일이 현재 디렉토리에 없습니다.\n")
+    if not os.path.isfile(GDSCLIENT_PATH):
+        log_text.insert(tk.END, f"[오류] GDSClientLinux 파일을 찾을 수 없습니다: {GDSCLIENT_PATH}\n")
         return False
 
-    # 실행 권한이 있는지 확인 (소유자 X 권한)
-    file_stat = os.stat(gds_path)
+    # 실행 권한 확인
+    file_stat = os.stat(GDSCLIENT_PATH)
     if not (file_stat.st_mode & stat.S_IXUSR):
         log_text.insert(tk.END, "[정보] GDSClientLinux에 실행 권한이 없어 설정합니다...\n")
         try:
-            run_command(["sudo", "chmod", "+x", gds_path])
+            run_command(["sudo", "chmod", "+x", GDSCLIENT_PATH])
         except Exception as e:
             log_text.insert(tk.END, f"[오류] GDSClientLinux 실행 권한 설정 실패: {e}\n")
             return False
@@ -47,19 +52,22 @@ def ensure_gdsclientlinux_executable():
 def check_and_install_tftpd():
     """
     tftpd-hpa 패키지가 설치되어 있는지 확인하고,
-    없다면 자동으로 설치한다. (sudo 권한 필요)
+    없다면 자동으로 설치 (sudo 권한 필요).
     """
     log_text.insert(tk.END, "[정보] tftpd-hpa 설치 여부 확인 중...\n")
     try:
-        # dpkg -l tftpd-hpa
-        check_install = subprocess.check_output(["dpkg", "-l", "tftpd-hpa"], stderr=subprocess.STDOUT, universal_newlines=True)
+        check_install = subprocess.check_output(
+            ["dpkg", "-l", "tftpd-hpa"],
+            stderr=subprocess.STDOUT,
+            universal_newlines=True
+        )
         if "tftpd-hpa" in check_install:
             log_text.insert(tk.END, "[정보] tftpd-hpa가 이미 설치되어 있습니다.\n")
             return True
     except subprocess.CalledProcessError:
         pass
 
-    # 미설치 시 자동 설치 진행
+    # 미설치 시 자동 설치
     log_text.insert(tk.END, "[정보] tftpd-hpa가 설치되어 있지 않아 설치를 진행합니다...\n")
     try:
         run_command(["sudo", "apt-get", "update"])
@@ -71,26 +79,22 @@ def check_and_install_tftpd():
 
 def start_tftp_server():
     """
-    tftpd-hpa 서비스를 enable하고 start한다.
-    (이미 실행 중이면 그대로 유지)
+    tftpd-hpa 서비스를 enable하고 start한다 (이미 실행 중이면 그대로 유지).
     """
     log_text.insert(tk.END, "[정보] TFTP 서버를 시작합니다...\n")
-
-    # 부팅 시 자동 실행
     run_command(["sudo", "systemctl", "enable", "tftpd-hpa"])
-    # 서버 시작
     run_command(["sudo", "systemctl", "start", "tftpd-hpa"])
 
 def copy_to_tftp(file_path):
     """
-    업그레이드 파일을 TFTP 루트 디렉토리로 복사 후 권한 설정
+    업그레이드 파일을 TFTP 루트 디렉토리에 복사 후 권한 설정.
     """
     if not os.path.isfile(file_path):
-        log_text.insert(tk.END, f"[오류] 해당 파일이 존재하지 않습니다: {file_path}\n")
+        log_text.insert(tk.END, f"[오류] 파일이 존재하지 않습니다: {file_path}\n")
         return False
 
     if not os.path.exists(TFTP_ROOT_DIR):
-        log_text.insert(tk.END, f"[오류] TFTP 루트 디렉토리가 존재하지 않습니다: {TFTP_ROOT_DIR}\n")
+        log_text.insert(tk.END, f"[오류] TFTP 루트 디렉토리가 없습니다: {TFTP_ROOT_DIR}\n")
         return False
 
     file_name = os.path.basename(file_path)
@@ -99,7 +103,6 @@ def copy_to_tftp(file_path):
     try:
         shutil.copy(file_path, dest_path)
         log_text.insert(tk.END, f"[파일 복사] {file_path} -> {dest_path}\n")
-        # 권한 설정 (읽기 가능하도록)
         run_command(["sudo", "chmod", "644", dest_path])
         return True
     except Exception as e:
@@ -110,35 +113,35 @@ def copy_to_tftp(file_path):
 def get_chip_size():
     ip = detector_ip_entry.get().strip()
     if ip:
-        run_command(["./GDSClientLinux", ip, "0"])
+        run_command([GDSCLIENT_PATH, ip, "0"])
     else:
         messagebox.showwarning("경고", "Detector IP를 입력하세요")
 
 def get_mode():
     ip = detector_ip_entry.get().strip()
     if ip:
-        run_command(["./GDSClientLinux", ip, "1"])
+        run_command([GDSCLIENT_PATH, ip, "1"])
     else:
         messagebox.showwarning("경고", "Detector IP를 입력하세요")
 
 def get_version():
     ip = detector_ip_entry.get().strip()
     if ip:
-        run_command(["./GDSClientLinux", ip, "2"])
+        run_command([GDSCLIENT_PATH, ip, "2"])
     else:
         messagebox.showwarning("경고", "Detector IP를 입력하세요")
 
 def reboot():
     ip = detector_ip_entry.get().strip()
     if ip:
-        run_command(["./GDSClientLinux", ip, "3"])
+        run_command([GDSCLIENT_PATH, ip, "3"])
     else:
         messagebox.showwarning("경고", "Detector IP를 입력하세요")
 
 def change_mode():
     ip = detector_ip_entry.get().strip()
     if ip:
-        run_command(["./GDSClientLinux", ip, "4", "1"])
+        run_command([GDSCLIENT_PATH, ip, "4", "1"])
     else:
         messagebox.showwarning("경고", "Detector IP를 입력하세요")
 
@@ -150,10 +153,11 @@ def select_file():
 
 def upgrade():
     """
-    1) 업그레이드 파일을 TFTP 디렉토리에 복사
-    2) TFTP 서버 실행 확인
-    3) 모드 변경 (4 1)
-    4) 업그레이드 (5 tftpIp fileName)
+    업그레이드 절차:
+      1) 파일을 TFTP 루트 디렉토리에 복사
+      2) TFTP 서버 실행 확인
+      3) 모드 변경 (4,1)
+      4) 업그레이드 (5, tftpIp, fileName)
     """
     detector_ip = detector_ip_entry.get().strip()
     tftp_ip = tftp_ip_entry.get().strip()
@@ -163,30 +167,30 @@ def upgrade():
         messagebox.showwarning("경고", "모든 입력 항목(Detector IP, TFTP IP, 업그레이드 파일)을 입력하세요.")
         return
 
-    # 1. 파일을 TFTP 디렉토리로 복사
+    # 1. 파일 복사
     if not copy_to_tftp(upgrade_file_path):
-        return  # 파일 복사 실패 시 중단
+        return
 
-    # 2. TFTP 서버 자동 실행
+    # 2. TFTP 서버 기동
     start_tftp_server()
 
     # 3. 모드 변경
-    run_command(["./GDSClientLinux", detector_ip, "4", "1"])
+    run_command([GDSCLIENT_PATH, detector_ip, "4", "1"])
 
     # 4. 업그레이드
     file_name = os.path.basename(upgrade_file_path)
-    run_command(["./GDSClientLinux", detector_ip, "5", tftp_ip, file_name])
+    run_command([GDSCLIENT_PATH, detector_ip, "5", tftp_ip, file_name])
 
 # --------------------- GUI 초기화 ---------------------- #
 root = tk.Tk()
-root.title("GDS 클라이언트 UI (TFTP 서버 자동화 + 실행권한 자동 설정)")
+root.title("GDS 클라이언트 UI (TFTP 서버 자동화 + 절대경로 사용)")
 
-# 상단 안내 문구
 info_label = tk.Label(
     root,
     text=(
-        "라즈베리파이에서 자동으로 TFTP 서버 구동 + GDSClientLinux 명령을 사용합니다.\n"
-        "관리자 권한(sudo)으로 실행되어야 정상 동작합니다."
+        "라즈베리파이/Ubuntu에서 TFTP 서버를 자동 구동하고,\n"
+        "GDSClientLinux 명령을 절대 경로로 실행합니다.\n"
+        "sudo 권한으로 실행해야 정상 동작합니다."
     ),
     fg="blue"
 )
@@ -236,33 +240,28 @@ btn_change_mode.grid(row=1, column=1, padx=5, pady=5)
 btn_upgrade = tk.Button(frame_buttons, text="업그레이드", width=15, command=upgrade)
 btn_upgrade.grid(row=1, column=2, padx=5, pady=5)
 
-# 로그 영역
+# 로그 창
 log_text = scrolledtext.ScrolledText(root, width=80, height=15)
 log_text.pack(padx=10, pady=10)
 
-# 프로그램 실행 시 초기 작업 (TFTP 서버 확인 등)
 def on_start():
-    # 1. GDSClientLinux 실행 권한 보장
+    # 1. GDSClientLinux 실행 권한 확인
     if not ensure_gdsclientlinux_executable():
-        log_text.insert(tk.END, "[오류] GDSClientLinux 실행 권한 설정 실패 또는 파일이 없습니다.\n")
+        log_text.insert(tk.END, "[오류] GDSClientLinux 실행 권한 설정 실패, 혹은 파일이 없습니다.\n")
 
-    # 2. tftpd-hpa 설치 확인 & 필요 시 설치
+    # 2. tftpd-hpa 설치 확인 & 자동 설치
     if check_and_install_tftpd():
-        # 설치되어 있다면, TFTP 서버 자동 시작
         start_tftp_server()
 
-    # 3. 라즈베리파이 IP 자동 입력 (첫 번째 IP만 사용)
+    # 3. 라즈베리파이/Ubuntu IP 자동 입력 (첫 번째 IP 사용)
     try:
-        # hostname -I 명령을 사용해 IP 목록 가져오기
         all_ips = subprocess.check_output(["hostname", "-I"], universal_newlines=True).strip().split()
         if all_ips:
-            # TFTP IP 항목에 첫 번째 IP를 자동으로 입력
             tftp_ip_entry.delete(0, tk.END)
-            tftp_ip_entry.insert(0, all_ips[0])
+            tftp_ip_entry.insert(0, all_ips[0])  # 첫 번째 IP를 TFTP IP에 자동 입력
     except:
-        # 실패 시 무시
         pass
 
-# 윈도우가 완전히 표시된 직후에 실행
+# 메인 윈도우 표시 후 on_start 실행
 root.after(100, on_start)
 root.mainloop()
