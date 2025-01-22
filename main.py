@@ -4,6 +4,7 @@ from tkinter import filedialog, messagebox, scrolledtext
 import subprocess
 import os
 import shutil
+import stat  # 실행 권한 체크를 위해 필요
 
 os.environ['DISPLAY'] = ':0'
 
@@ -20,6 +21,28 @@ def run_command(args):
         log_text.insert(tk.END, output + "\n")
     except subprocess.CalledProcessError as e:
         log_text.insert(tk.END, f"[오류]\n{e.output}\n")
+
+def ensure_gdsclientlinux_executable():
+    """
+    GDSClientLinux 파일이 현재 디렉토리에 있는지, 실행 권한이 있는지 확인하고,
+    없다면 안내 메시지 또는 자동으로 chmod +x를 수행한다.
+    """
+    gds_path = "./GDSClientLinux"
+    if not os.path.isfile(gds_path):
+        log_text.insert(tk.END, "[오류] GDSClientLinux 파일이 현재 디렉토리에 없습니다.\n")
+        return False
+
+    # 실행 권한이 있는지 확인 (소유자 X 권한)
+    file_stat = os.stat(gds_path)
+    if not (file_stat.st_mode & stat.S_IXUSR):
+        log_text.insert(tk.END, "[정보] GDSClientLinux에 실행 권한이 없어 설정합니다...\n")
+        try:
+            run_command(["sudo", "chmod", "+x", gds_path])
+        except Exception as e:
+            log_text.insert(tk.END, f"[오류] GDSClientLinux 실행 권한 설정 실패: {e}\n")
+            return False
+
+    return True
 
 def check_and_install_tftpd():
     """
@@ -156,12 +179,17 @@ def upgrade():
 
 # --------------------- GUI 초기화 ---------------------- #
 root = tk.Tk()
-root.title("GDS 클라이언트 UI (TFTP 서버 자동화)")
+root.title("GDS 클라이언트 UI (TFTP 서버 자동화 + 실행권한 자동 설정)")
 
 # 상단 안내 문구
-info_label = tk.Label(root, text="라즈베리파이에서 자동으로 TFTP 서버 구동 + GDSClientLinux 명령을 사용합니다.\n"
-                                 "관리자 권한(sudo)으로 실행되어야 정상 동작합니다.",
-                      fg="blue")
+info_label = tk.Label(
+    root,
+    text=(
+        "라즈베리파이에서 자동으로 TFTP 서버 구동 + GDSClientLinux 명령을 사용합니다.\n"
+        "관리자 권한(sudo)으로 실행되어야 정상 동작합니다."
+    ),
+    fg="blue"
+)
 info_label.pack(padx=10, pady=5)
 
 # IP 입력 프레임
@@ -214,12 +242,16 @@ log_text.pack(padx=10, pady=10)
 
 # 프로그램 실행 시 초기 작업 (TFTP 서버 확인 등)
 def on_start():
-    # 1. tftpd-hpa 설치 확인 & 필요 시 설치
+    # 1. GDSClientLinux 실행 권한 보장
+    if not ensure_gdsclientlinux_executable():
+        log_text.insert(tk.END, "[오류] GDSClientLinux 실행 권한 설정 실패 또는 파일이 없습니다.\n")
+
+    # 2. tftpd-hpa 설치 확인 & 필요 시 설치
     if check_and_install_tftpd():
         # 설치되어 있다면, TFTP 서버 자동 시작
         start_tftp_server()
 
-    # 2. 라즈베리파이 IP 자동 입력 (첫 번째 IP만 사용)
+    # 3. 라즈베리파이 IP 자동 입력 (첫 번째 IP만 사용)
     try:
         # hostname -I 명령을 사용해 IP 목록 가져오기
         all_ips = subprocess.check_output(["hostname", "-I"], universal_newlines=True).strip().split()
@@ -233,5 +265,4 @@ def on_start():
 
 # 윈도우가 완전히 표시된 직후에 실행
 root.after(100, on_start)
-
 root.mainloop()
