@@ -19,6 +19,10 @@ GDSCLIENT_PATH = "/home/gdseng/GDS_Release_20250110/GDSClientLinux"
 TFTP_ROOT_DIR = "/srv/tftp"
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
+# 전역 스레드/이벤트 객체
+auto_thread = None                 # 자동 업그레이드 반복 스레드
+stop_event = threading.Event()     # 중지 신호 전달용 이벤트
+
 # ----- (A) 로그를 안전하게 UI에 표시하는 함수 ----- #
 def async_log_print(msg: str):
     def insert_log():
@@ -28,6 +32,11 @@ def async_log_print(msg: str):
 
 # ----- (B) 실시간 로그를 읽는 subprocess 실행 함수 ----- #
 def run_command_realtime(args):
+    """
+    subprocess.Popen으로 args를 실행하고,
+    stdout을 한 줄씩 읽어 async_log_print로 실시간 표시한다.
+    결과 코드(0=성공, 그 외=에러)를 리턴.
+    """
     try:
         p = subprocess.Popen(
             args,
@@ -167,8 +176,6 @@ def upgrade_once():
 # ============================================================
 # =============== 랜덤 반복 업그레이드 관련 로직 ===============
 # ============================================================
-stop_event = threading.Event()  # 중지 여부를 관리하는 이벤트
-
 def auto_upgrade_loop():
     """
     stop_event가 꺼질 때까지
@@ -194,35 +201,39 @@ def auto_upgrade_loop():
             time.sleep(1)
 
 def start_auto_upgrade():
-    """
-    '시작' 버튼을 누르면 호출.
-    이미 동작 중이면 무시,
-    동작 중이 아니면 새 스레드를 시작.
-    """
+    # 전역변수를 함수 내부에서 수정/참조하려면 첫 줄에 선언
+    global auto_thread
+
+    # GDSClientLinux 파일 체크
     if not ensure_gdsclientlinux_executable():
         async_log_print("[오류] GDSClientLinux 실행 권한 설정 실패 또는 파일이 없습니다.")
         return
 
+    # tftpd-hpa 설치 체크
     if not check_and_install_tftpd():
         async_log_print("[오류] tftpd-hpa 설치가 안 되어 업그레이드를 진행할 수 없습니다.")
         return
 
+    detector_ip = detector_ip_entry.get().strip()
+    tftp_ip = tftp_ip_entry.get().strip()
+    upgrade_file_path = file_entry.get().strip()
+    if not detector_ip or not tftp_ip or not upgrade_file_path:
+        messagebox.showwarning("경고", "모든 입력 항목(Detector IP, TFTP IP, 업그레이드 파일)을 입력하세요.")
+        return
+
+    # 이미 동작 중인지 확인
     if not auto_thread or not auto_thread.is_alive():
         # 이벤트 초기화 후 스레드 시작
         stop_event.clear()
         async_log_print("[자동모드] 무작위 업그레이드 시작")
-        # 백그라운드 스레드 실행
-        global auto_thread
         auto_thread = threading.Thread(target=auto_upgrade_loop, daemon=True)
         auto_thread.start()
     else:
         async_log_print("[자동모드] 이미 동작 중입니다.")
 
 def stop_auto_upgrade():
-    """
-    '중지' 버튼을 누르면 호출.
-    stop_event를 세트하여 루프가 종료되도록 함.
-    """
+    global auto_thread
+
     if auto_thread and auto_thread.is_alive():
         async_log_print("[자동모드] 중지 명령 전송")
         stop_event.set()
@@ -285,7 +296,6 @@ btn_start_auto.grid(row=0, column=0, padx=5, pady=5)
 btn_stop_auto = tk.Button(frame_buttons, text="자동 업그레이드 중지", width=20, command=stop_auto_upgrade)
 btn_stop_auto.grid(row=0, column=1, padx=5, pady=5)
 
-# 필요 시 단발 업그레이드 버튼도 남겨둡니다. (원치 않으면 제거 가능)
 btn_upgrade_once = tk.Button(frame_buttons, text="단발 업그레이드 실행", width=20, command=upgrade_once)
 btn_upgrade_once.grid(row=0, column=2, padx=5, pady=5)
 
@@ -310,16 +320,13 @@ def on_start():
     if ensure_gdsclientlinux_executable():
         check_and_install_tftpd()
 
-    # IP 기본값 (예시)
+    # 예시 기본값
     tftp_ip_entry.delete(0, tk.END)
     tftp_ip_entry.insert(0, "192.168.0.4")
 
     detector_ip_entry.delete(0, tk.END)
-    detector_ip_entry.insert(0, "192.168.0.")  # 사용자가 끝자리만 수정
+    detector_ip_entry.insert(0, "192.168.0.")  # 끝자리만 변경하도록 유도
 
 root.after(100, on_start)
-
-# 전역 스레드 객체
-auto_thread = None
 
 root.mainloop()
