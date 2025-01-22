@@ -5,7 +5,8 @@ import subprocess
 import os
 
 os.environ['DISPLAY'] = ':0'
-#pygame.mixer.init()
+# pygame.mixer.init()
+
 # GDSClientLinux 실행 함수
 def run_command(args):
     try:
@@ -13,7 +14,7 @@ def run_command(args):
         output = subprocess.check_output(args, stderr=subprocess.STDOUT, universal_newlines=True)
         log_text.insert(tk.END, output + "\n")
     except subprocess.CalledProcessError as e:
-        log_text.insert(tk.END, f"Error: {e.output}\n")
+        log_text.insert(tk.END, f"오류: {e.output}\n")
 
 def get_chip_size():
     detector_ip = detector_ip_entry.get().strip()
@@ -73,7 +74,7 @@ def upgrade():
 
 # 메인 윈도우 생성
 root = tk.Tk()
-root.title("GDS Client UI")
+root.title("GDS 클라이언트 UI")
 
 # IP 입력 프레임
 frame_ip = tk.Frame(root)
@@ -91,7 +92,7 @@ tftp_ip_entry.grid(row=0, column=3, padx=5)
 frame_file = tk.Frame(root)
 frame_file.pack(padx=10, pady=5, fill="x")
 
-tk.Label(frame_file, text="Upgrade File:").grid(row=0, column=0, sticky="e")
+tk.Label(frame_file, text="업그레이드 파일:").grid(row=0, column=0, sticky="e")
 file_entry = tk.Entry(frame_file, width=40)
 file_entry.grid(row=0, column=1, padx=5)
 file_btn = tk.Button(frame_file, text="파일 선택", command=select_file)
@@ -101,22 +102,22 @@ file_btn.grid(row=0, column=2, padx=5)
 frame_buttons = tk.Frame(root)
 frame_buttons.pack(padx=10, pady=5)
 
-btn_chip_size = tk.Button(frame_buttons, text="Get ChipSize", width=15, command=get_chip_size)
+btn_chip_size = tk.Button(frame_buttons, text="칩 크기 조회", width=15, command=get_chip_size)
 btn_chip_size.grid(row=0, column=0, padx=5, pady=5)
 
-btn_mode = tk.Button(frame_buttons, text="Get Mode(Bank)", width=15, command=get_mode)
+btn_mode = tk.Button(frame_buttons, text="모드 조회 (뱅크)", width=15, command=get_mode)
 btn_mode.grid(row=0, column=1, padx=5, pady=5)
 
-btn_version = tk.Button(frame_buttons, text="Get Version", width=15, command=get_version)
+btn_version = tk.Button(frame_buttons, text="버전 조회", width=15, command=get_version)
 btn_version.grid(row=0, column=2, padx=5, pady=5)
 
-btn_reboot = tk.Button(frame_buttons, text="Reboot", width=15, command=reboot)
+btn_reboot = tk.Button(frame_buttons, text="재부팅", width=15, command=reboot)
 btn_reboot.grid(row=1, column=0, padx=5, pady=5)
 
-btn_change_mode = tk.Button(frame_buttons, text="Change Mode (4 1)", width=15, command=change_mode)
+btn_change_mode = tk.Button(frame_buttons, text="모드 변경 (4 1)", width=15, command=change_mode)
 btn_change_mode.grid(row=1, column=1, padx=5, pady=5)
 
-btn_upgrade = tk.Button(frame_buttons, text="Upgrade", width=15, command=upgrade)
+btn_upgrade = tk.Button(frame_buttons, text="업그레이드", width=15, command=upgrade)
 btn_upgrade.grid(row=1, column=2, padx=5, pady=5)
 
 # 로그 출력 창 (scrolledtext)
