@@ -2,7 +2,10 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 import subprocess
+import os
 
+os.environ['DISPLAY'] = ':0'
+pygame.mixer.init()
 # GDSClientLinux 실행 함수
 def run_command(args):
     try:
