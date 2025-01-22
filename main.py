@@ -5,6 +5,8 @@ import subprocess
 import os
 import shutil
 
+os.environ['DISPLAY'] = ':0'
+
 # TFTP 서버 루트 디렉토리
 TFTP_ROOT_DIR = "/srv/tftp"
 
