@@ -244,6 +244,23 @@ btn_upgrade.grid(row=1, column=2, padx=5, pady=5)
 log_text = scrolledtext.ScrolledText(root, width=80, height=15)
 log_text.pack(padx=10, pady=10)
 
+### [추가됨] Ctrl + C, Ctrl + V, Ctrl + X 바인딩
+log_text.bind("<Control-c>", lambda event: log_text.event_generate("<<Copy>>"))
+log_text.bind("<Control-v>", lambda event: log_text.event_generate("<<Paste>>"))
+log_text.bind("<Control-x>", lambda event: log_text.event_generate("<<Cut>>"))
+
+### [추가됨] 마우스 우클릭 메뉴 (복사)
+def copy_selection():
+    log_text.event_generate("<<Copy>>")
+
+context_menu = tk.Menu(log_text, tearoff=0)
+context_menu.add_command(label="복사", command=copy_selection)
+
+def show_context_menu(event):
+    context_menu.tk_popup(event.x_root, event.y_root)
+
+log_text.bind("<Button-3>", show_context_menu)
+
 def on_start():
     # 1. GDSClientLinux 실행 권한 확인
     if not ensure_gdsclientlinux_executable():
