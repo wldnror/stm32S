@@ -5,6 +5,7 @@ import subprocess
 import os
 import shutil
 import stat  # 실행 권한 체크를 위해 필요
+import time  # (추가) 모드 전환 후 잠시 대기 위해 사용
 
 os.environ['DISPLAY'] = ':0'
 
@@ -157,7 +158,8 @@ def upgrade():
       1) 파일을 TFTP 루트 디렉토리에 복사
       2) TFTP 서버 실행 확인
       3) 모드 변경 (4,1)
-      4) 업그레이드 (5, tftpIp, fileName)
+      4) 일정 시간 대기 (2초 정도)
+      5) 업그레이드 (5, tftpIp, fileName)
     """
     detector_ip = detector_ip_entry.get().strip()
     tftp_ip = tftp_ip_entry.get().strip()
@@ -177,7 +179,10 @@ def upgrade():
     # 3. 모드 변경
     run_command([GDSCLIENT_PATH, detector_ip, "4", "1"])
 
-    # 4. 업그레이드
+    # (추가) 4. 디텍터가 업그레이드 모드로 전환될 시간을 준다 (2초 대기)
+    time.sleep(2)
+
+    # 5. 업그레이드
     file_name = os.path.basename(upgrade_file_path)
     run_command([GDSCLIENT_PATH, detector_ip, "5", tftp_ip, file_name])
 
