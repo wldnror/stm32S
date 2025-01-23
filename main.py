@@ -7,16 +7,17 @@ import shutil
 import stat
 import time
 import threading
-import socket  # 추가
+import socket
+import json
 
 os.environ['DISPLAY'] = ':0'
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# 1) GDSClientLinux의 절대 경로 설정 (예시: Ubuntu x86_64 환경)
-#    실제 설치된 경로에 맞추어 수정하세요.
-GDSCLIENT_PATH = "/home/gdseng/GDS_Release_20250110/GDSClientLinux"
+# 1) GDSClientLinux의 절대 경로 설정을 제거 (동적으로 설정)
+# 2) 설정 파일 경로 설정
+CONFIG_FILE = os.path.expanduser("~/.gds_client_config.json")
 
-# 2) TFTP 서버 루트 디렉토리(예: /srv/tftp)
+# 3) TFTP 서버 루트 디렉토리(예: /srv/tftp)
 TFTP_ROOT_DIR = "/srv/tftp"
 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
@@ -59,77 +60,66 @@ def run_command_realtime(args):
     p.wait()  # 프로세스 종료 대기
     return p.returncode
 
-
-# --------------------- (C) 기존에 사용하던 함수들 (권한 체크, TFTP 설치 등) --------------------- #
-def ensure_gdsclientlinux_executable():
-    if not os.path.isfile(GDSCLIENT_PATH):
-        async_log_print(f"[오류] GDSClientLinux 파일을 찾을 수 없습니다: {GDSCLIENT_PATH}")
-        return False
-
-    # 실행 권한 확인
-    file_stat = os.stat(GDSCLIENT_PATH)
-    if not (file_stat.st_mode & stat.S_IXUSR):
-        async_log_print("[정보] GDSClientLinux에 실행 권한이 없어 설정합니다...")
-        ret = run_command_realtime(["sudo", "chmod", "+x", GDSCLIENT_PATH])
-        if ret != 0:
-            async_log_print("[오류] GDSClientLinux 실행 권한 설정 실패")
-            return False
-
-    return True
-
-def check_and_install_tftpd():
-    async_log_print("[정보] tftpd-hpa 설치 여부 확인 중...")
+# --------------------- (C) 설정 파일 관리 함수 --------------------- #
+def load_config():
+    """
+    설정 파일을 로드하여 딕셔너리로 반환합니다.
+    설정 파일이 없거나 읽을 수 없는 경우 빈 딕셔너리를 반환합니다.
+    """
+    if not os.path.isfile(CONFIG_FILE):
+        return {}
     try:
-        check_install = subprocess.check_output(
-            ["dpkg", "-l", "tftpd-hpa"],
-            stderr=subprocess.STDOUT,
-            universal_newlines=True
-        )
-        if "tftpd-hpa" in check_install:
-            async_log_print("[정보] tftpd-hpa가 이미 설치되어 있습니다.")
-            return True
-    except subprocess.CalledProcessError:
-        pass
-
-    # 미설치 시 자동 설치
-    async_log_print("[정보] tftpd-hpa가 설치되어 있지 않아 설치를 진행합니다...")
-    ret = run_command_realtime(["sudo", "apt-get", "update"])
-    if ret != 0:
-        async_log_print("[오류] apt-get update 실패")
-        return False
-
-    ret = run_command_realtime(["sudo", "apt-get", "-y", "install", "tftpd-hpa"])
-    if ret == 0:
-        return True
-    else:
-        async_log_print("[오류] tftpd-hpa 설치 실패")
-        return False
-
-def start_tftp_server():
-    async_log_print("[정보] TFTP 서버를 시작합니다...")
-    run_command_realtime(["sudo", "systemctl", "enable", "tftpd-hpa"])
-    run_command_realtime(["sudo", "systemctl", "start", "tftpd-hpa"])
-
-def copy_to_tftp(file_path):
-    if not os.path.isfile(file_path):
-        async_log_print(f"[오류] 파일이 존재하지 않습니다: {file_path}")
-        return False
-
-    if not os.path.exists(TFTP_ROOT_DIR):
-        async_log_print(f"[오류] TFTP 루트 디렉토리가 없습니다: {TFTP_ROOT_DIR}")
-        return False
-
-    file_name = os.path.basename(file_path)
-    dest_path = os.path.join(TFTP_ROOT_DIR, file_name)
-
-    try:
-        shutil.copy(file_path, dest_path)
-        async_log_print(f"[파일 복사] {file_path} -> {dest_path}")
-        run_command_realtime(["sudo", "chmod", "644", dest_path])
-        return True
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
     except Exception as e:
-        async_log_print(f"[오류] 파일 복사 중 문제 발생: {e}")
-        return False
+        async_log_print(f"[오류] 설정 파일을 로드할 수 없습니다: {e}")
+        return {}
+
+def save_config(config):
+    """
+    딕셔너리를 설정 파일로 저장합니다.
+    """
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+    except Exception as e:
+        async_log_print(f"[오류] 설정 파일을 저장할 수 없습니다: {e}")
+
+def select_gdsclientlinux():
+    """
+    사용자에게 GDSClientLinux 실행 파일을 선택하도록 요청하고, 설정 파일에 저장합니다.
+    """
+    filepath = filedialog.askopenfilename(
+        title="GDSClientLinux 실행 파일 선택",
+        filetypes=[("Executable Files", "GDSClientLinux"), ("All Files", "*.*")]
+    )
+    if filepath:
+        config = load_config()
+        config['GDSCLIENT_PATH'] = filepath
+        save_config(config)
+        async_log_print(f"[설정] GDSClientLinux 경로가 설정되었습니다: {filepath}")
+        return filepath
+    else:
+        async_log_print("[경고] GDSClientLinux 실행 파일을 선택하지 않았습니다.")
+        return None
+
+def get_gdsclient_path():
+    """
+    설정 파일에서 GDSClientLinux 경로를 불러오거나, 경로가 유효하지 않으면 사용자에게 선택을 요청합니다.
+    """
+    config = load_config()
+    gds_path = config.get('GDSCLIENT_PATH', None)
+    if gds_path and os.path.isfile(gds_path):
+        return gds_path
+    else:
+        async_log_print("[정보] GDSClientLinux 경로가 설정되지 않았거나 유효하지 않습니다.")
+        gds_path = select_gdsclientlinux()
+        if gds_path:
+            return gds_path
+        else:
+            messagebox.showerror("오류", "GDSClientLinux 실행 파일 경로가 설정되지 않았습니다.")
+            root.quit()
+            return None
 
 # --------------------- (D) 단일 명령(조회, 재부팅, 모드변경 등)을 실행하는 함수들 --------------------- #
 def get_chip_size():
@@ -334,15 +324,22 @@ def get_local_ip():
     return IP
 
 def on_start():
-    # 1. GDSClientLinux 실행 권한 확인
+    global GDSCLIENT_PATH
+
+    # 1. GDSClientLinux 실행 경로 가져오기
+    GDSCLIENT_PATH = get_gdsclient_path()
+    if not GDSCLIENT_PATH:
+        return  # 경로 설정 실패 시 종료
+
+    # 2. GDSClientLinux 실행 권한 확인
     if not ensure_gdsclientlinux_executable():
         async_log_print("[오류] GDSClientLinux 실행 권한 설정 실패 혹은 파일이 없습니다.")
 
-    # 2. tftpd-hpa 설치 확인 & 자동 설치
+    # 3. tftpd-hpa 설치 확인 & 자동 설치
     if check_and_install_tftpd():
         start_tftp_server()
 
-    # 3. TFTP IP & Detector IP 자동 설정
+    # 4. TFTP IP & Detector IP 자동 설정
     local_ip = get_local_ip()
     async_log_print(f"[정보] 로컬 IP 주소 감지: {local_ip}")
 
@@ -359,6 +356,79 @@ def on_start():
 
     detector_ip_entry.delete(0, tk.END)
     detector_ip_entry.insert(0, base_ip)
+
+# --------------------- (C) 기존에 사용하던 함수들 (권한 체크, TFTP 설치 등) --------------------- #
+def ensure_gdsclientlinux_executable():
+    if not os.path.isfile(GDSCLIENT_PATH):
+        async_log_print(f"[오류] GDSClientLinux 파일을 찾을 수 없습니다: {GDSCLIENT_PATH}")
+        return False
+
+    # 실행 권한 확인
+    file_stat = os.stat(GDSCLIENT_PATH)
+    if not (file_stat.st_mode & stat.S_IXUSR):
+        async_log_print("[정보] GDSClientLinux에 실행 권한이 없어 설정합니다...")
+        ret = run_command_realtime(["sudo", "chmod", "+x", GDSCLIENT_PATH])
+        if ret != 0:
+            async_log_print("[오류] GDSClientLinux 실행 권한 설정 실패")
+            return False
+
+    return True
+
+def check_and_install_tftpd():
+    async_log_print("[정보] tftpd-hpa 설치 여부 확인 중...")
+    try:
+        check_install = subprocess.check_output(
+            ["dpkg", "-l", "tftpd-hpa"],
+            stderr=subprocess.STDOUT,
+            universal_newlines=True
+        )
+        if "tftpd-hpa" in check_install:
+            async_log_print("[정보] tftpd-hpa가 이미 설치되어 있습니다.")
+            return True
+    except subprocess.CalledProcessError:
+        pass
+
+    # 미설치 시 자동 설치
+    async_log_print("[정보] tftpd-hpa가 설치되어 있지 않아 설치를 진행합니다...")
+    ret = run_command_realtime(["sudo", "apt-get", "update"])
+    if ret != 0:
+        async_log_print("[오류] apt-get update 실패")
+        return False
+
+    ret = run_command_realtime(["sudo", "apt-get", "-y", "install", "tftpd-hpa"])
+    if ret == 0:
+        return True
+    else:
+        async_log_print("[오류] tftpd-hpa 설치 실패")
+        return False
+
+def start_tftp_server():
+    async_log_print("[정보] TFTP 서버를 시작합니다...")
+    run_command_realtime(["sudo", "systemctl", "enable", "tftpd-hpa"])
+    run_command_realtime(["sudo", "systemctl", "start", "tftpd-hpa"])
+
+def copy_to_tftp(file_path):
+    if not os.path.isfile(file_path):
+        async_log_print(f"[오류] 파일이 존재하지 않습니다: {file_path}")
+        return False
+
+    if not os.path.exists(TFTP_ROOT_DIR):
+        async_log_print(f"[오류] TFTP 루트 디렉토리가 없습니다: {TFTP_ROOT_DIR}")
+        return False
+
+    file_name = os.path.basename(file_path)
+    dest_path = os.path.join(TFTP_ROOT_DIR, file_name)
+
+    try:
+        shutil.copy(file_path, dest_path)
+        async_log_print(f"[파일 복사] {file_path} -> {dest_path}")
+        run_command_realtime(["sudo", "chmod", "644", dest_path])
+        return True
+    except Exception as e:
+        async_log_print(f"[오류] 파일 복사 중 문제 발생: {e}")
+        return False
+
+# --------------------- (G) 시작 시 자동 설정 ---------------------- #
 
 # 메인 윈도우 표시 후 on_start 실행 (100ms 후)
 root.after(100, on_start)
