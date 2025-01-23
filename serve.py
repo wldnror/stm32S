@@ -8,12 +8,15 @@ import stat
 import time
 import threading
 import random
+import socket
+import json
 
+# 디스플레이 환경 변수 설정 (리눅스에서 GUI를 사용할 경우 필요)
 os.environ['DISPLAY'] = ':0'
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# 1) GDSClientLinux의 절대 경로 설정 (실제 환경에 맞게 수정)
-GDSCLIENT_PATH = "/home/gdseng/GDS_Release_20250110/GDSClientLinux"
+# 1) 설정 파일 경로 설정
+CONFIG_FILE = os.path.expanduser("~/.gds_client_config_auto_upgrade.json")
 
 # 2) TFTP 서버 루트 디렉토리 (실제 환경에 맞게 수정)
 TFTP_ROOT_DIR = "/srv/tftp"
@@ -23,14 +26,18 @@ TFTP_ROOT_DIR = "/srv/tftp"
 auto_thread = None                 # 자동 업그레이드 반복 스레드
 stop_event = threading.Event()     # 중지 신호 전달용 이벤트
 
-# ----- (A) 로그를 안전하게 UI에 표시하는 함수 ----- #
+# --------------------- (A) 로그 업데이트를 안전하게 수행하는 함수 --------------------- #
 def async_log_print(msg: str):
+    """
+    다른 스레드에서 호출하면,
+    메인 스레드가 log_text에 안전하게 append하도록 해준다.
+    """
     def insert_log():
         log_text.insert(tk.END, msg.rstrip() + "\n")
         log_text.see(tk.END)  # 자동 스크롤
     root.after(0, insert_log)
 
-# ----- (B) 실시간 로그를 읽는 subprocess 실행 함수 ----- #
+# --------------------- (B) 실시간 출력 받는 subprocess 실행 함수 --------------------- #
 def run_command_realtime(args):
     """
     subprocess.Popen으로 args를 실행하고,
@@ -57,7 +64,68 @@ def run_command_realtime(args):
     p.wait()
     return p.returncode
 
-# ----- (C) GDSClient 실행 권한 부여 체크 & tftpd-hpa 설치 체크 ----- #
+# --------------------- (C) 설정 파일 관리 함수 --------------------- #
+def load_config():
+    """
+    설정 파일을 로드하여 딕셔너리로 반환합니다.
+    설정 파일이 없거나 읽을 수 없는 경우 빈 딕셔너리를 반환합니다.
+    """
+    if not os.path.isfile(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        async_log_print(f"[오류] 설정 파일을 로드할 수 없습니다: {e}")
+        return {}
+
+def save_config(config):
+    """
+    딕셔너리를 설정 파일로 저장합니다.
+    """
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+    except Exception as e:
+        async_log_print(f"[오류] 설정 파일을 저장할 수 없습니다: {e}")
+
+def select_gdsclientlinux():
+    """
+    사용자에게 GDSClientLinux 실행 파일을 선택하도록 요청하고, 설정 파일에 저장합니다.
+    """
+    filepath = filedialog.askopenfilename(
+        title="GDSClientLinux 실행 파일 선택",
+        filetypes=[("Executable Files", "GDSClientLinux"), ("All Files", "*.*")]
+    )
+    if filepath:
+        config = load_config()
+        config['GDSCLIENT_PATH'] = filepath
+        save_config(config)
+        async_log_print(f"[설정] GDSClientLinux 경로가 설정되었습니다: {filepath}")
+        return filepath
+    else:
+        async_log_print("[경고] GDSClientLinux 실행 파일을 선택하지 않았습니다.")
+        return None
+
+def get_gdsclient_path():
+    """
+    설정 파일에서 GDSClientLinux 경로를 불러오거나, 경로가 유효하지 않으면 사용자에게 선택을 요청합니다.
+    """
+    config = load_config()
+    gds_path = config.get('GDSCLIENT_PATH', None)
+    if gds_path and os.path.isfile(gds_path):
+        return gds_path
+    else:
+        async_log_print("[정보] GDSClientLinux 경로가 설정되지 않았거나 유효하지 않습니다.")
+        gds_path = select_gdsclientlinux()
+        if gds_path:
+            return gds_path
+        else:
+            messagebox.showerror("오류", "GDSClientLinux 실행 파일 경로가 설정되지 않았습니다.")
+            root.quit()
+            return None
+
+# --------------------- (D) GDSClient 실행 권한 부여 체크 & tftpd-hpa 설치 체크 --------------------- #
 def ensure_gdsclientlinux_executable():
     if not os.path.isfile(GDSCLIENT_PATH):
         async_log_print(f"[오류] GDSClientLinux 파일을 찾을 수 없습니다: {GDSCLIENT_PATH}")
@@ -105,7 +173,7 @@ def start_tftp_server():
     run_command_realtime(["sudo", "systemctl", "enable", "tftpd-hpa"])
     run_command_realtime(["sudo", "systemctl", "start", "tftpd-hpa"])
 
-# ----- (D) 업그레이드 절차에 필요한 파일 복사 함수 ----- #
+# --------------------- (E) 업그레이드 절차에 필요한 파일 복사 함수 --------------------- #
 def copy_to_tftp(file_path):
     if not os.path.isfile(file_path):
         async_log_print(f"[오류] 파일이 존재하지 않습니다: {file_path}")
@@ -127,7 +195,7 @@ def copy_to_tftp(file_path):
         async_log_print(f"[오류] 파일 복사 중 문제 발생: {e}")
         return False
 
-# ----- (E) 업그레이드 단일 실행 프로세스 (모드 전환 후 업그레이드) ----- #
+# --------------------- (F) 업그레이드 단일 실행 프로세스 (모드 전환 후 업그레이드) --------------------- #
 def upgrade_task(detector_ip, tftp_ip, upgrade_file_paths):
     """
     업그레이드 절차:
@@ -167,7 +235,7 @@ def upgrade_task(detector_ip, tftp_ip, upgrade_file_paths):
     else:
         async_log_print("[알림] 업그레이드 명령 중 오류가 발생했습니다.")
 
-# ----- (F) 업그레이드(단발) 호출 함수 ----- #
+# --------------------- (G) 업그레이드(단발) 호출 함수 --------------------- #
 def upgrade_once():
     detector_ip = detector_ip_entry.get().strip()
     tftp_ip = tftp_ip_entry.get().strip()
@@ -194,6 +262,12 @@ def auto_upgrade_loop():
     detector_ip = detector_ip_entry.get().strip()
     tftp_ip = tftp_ip_entry.get().strip()
     upgrade_file_paths = file_entry.get().strip()
+
+    # 파일 리스트 파싱
+    files = [f.strip() for f in upgrade_file_paths.split(",") if f.strip()]
+    if not files:
+        async_log_print("[오류] 업그레이드할 파일이 선택되지 않았습니다.")
+        return
 
     while not stop_event.is_set():
         # 업그레이드 실행
@@ -250,13 +324,64 @@ def stop_auto_upgrade():
     else:
         async_log_print("[자동모드] 현재 동작 중이 아닙니다.")
 
-# ----- (G) 파일 선택 ----- #
+# ----- (H) 파일 선택 ----- #
 def select_files():
     filepaths = filedialog.askopenfilenames(title="업그레이드 파일 선택")
     if filepaths:
         file_entry.delete(0, tk.END)
         # 파일 경로를 콤마로 구분하여 저장
         file_entry.insert(0, ",".join(filepaths))
+
+# --------------------- (I) 컴퓨터의 로컬 IP 주소를 가져오는 함수 --------------------- #
+def get_local_ip():
+    """
+    로컬 IP 주소를 반환합니다.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # 외부에 연결하지 않고도 로컬 IP를 얻을 수 있습니다.
+        s.connect(('8.8.8.8', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = '127.0.0.1'  # 실패 시 루프백 주소 반환
+    finally:
+        s.close()
+    return IP
+
+# --------------------- (J) 시작 시 자동 설정 --------------------- #
+def on_start():
+    global GDSCLIENT_PATH
+
+    # 1. GDSClientLinux 실행 경로 가져오기
+    GDSCLIENT_PATH = get_gdsclient_path()
+    if not GDSCLIENT_PATH:
+        return  # 경로 설정 실패 시 종료
+
+    # 2. GDSClientLinux 실행 권한 확인
+    if not ensure_gdsclientlinux_executable():
+        async_log_print("[오류] GDSClientLinux 실행 권한 설정 실패 혹은 파일이 없습니다.")
+
+    # 3. tftpd-hpa 설치 확인 & 자동 설치
+    if check_and_install_tftpd():
+        start_tftp_server()
+
+    # 4. TFTP IP & Detector IP 자동 설정
+    local_ip = get_local_ip()
+    async_log_print(f"[정보] 로컬 IP 주소 감지: {local_ip}")
+
+    # TFTP IP 설정
+    tftp_ip_entry.delete(0, tk.END)
+    tftp_ip_entry.insert(0, local_ip)
+
+    # Detector IP의 서브넷 설정 (예: "192.168.0.")
+    try:
+        base_ip = '.'.join(local_ip.split('.')[:3]) + '.'
+    except Exception:
+        base_ip = "192.168.0."  # 실패 시 기본값 사용
+        async_log_print("[경고] 로컬 IP 분석 실패, 기본값 '192.168.0.' 사용")
+
+    detector_ip_entry.delete(0, tk.END)
+    detector_ip_entry.insert(0, base_ip)
 
 # ============================================================== #
 # ======================= Tkinter UI 구성 ======================= #
@@ -327,18 +452,8 @@ def show_context_menu(event):
 
 log_text.bind("<Button-3>", show_context_menu)
 
-# 처음 실행 시 GDSClient 권한 및 tftpd 상태 체크, IP 기본값 설정
-def on_start():
-    if ensure_gdsclientlinux_executable():
-        check_and_install_tftpd()
-
-    # 예시 기본값
-    tftp_ip_entry.delete(0, tk.END)
-    tftp_ip_entry.insert(0, "192.168.0.4")
-
-    detector_ip_entry.delete(0, tk.END)
-    detector_ip_entry.insert(0, "192.168.0.")  # 끝자리만 변경하도록 유도
-
+# --------------------- (K) 시작 시 자동 설정 --------------------- #
+# 메인 윈도우 표시 후 on_start 실행 (100ms 후)
 root.after(100, on_start)
 
 root.mainloop()
