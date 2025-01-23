@@ -91,7 +91,7 @@ def select_gdsclientlinux():
     """
     filepath = filedialog.askopenfilename(
         title="GDSClientLinux 실행 파일 선택",
-        filetypes=[("Executable Files", "GDSClientLinux"), ("All Files", "*.*")]
+        filetypes=[("Executable Files", "GDSClientLinux*"), ("All Files", "*.*")]
     )
     if filepath:
         config = load_config()
