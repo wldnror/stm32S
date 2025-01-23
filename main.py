@@ -15,7 +15,7 @@ os.environ['DISPLAY'] = ':0'
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 # 1) GDSClientLinux의 절대 경로 설정을 제거 (동적으로 설정)
 # 2) 설정 파일 경로 설정
-CONFIG_FILE = os.path.expanduser("~/.gds_client_config.json")
+CONFIG_FILE = os.path.expanduser("~/gds_client_config.json")
 
 # 3) TFTP 서버 루트 디렉토리(예: /srv/tftp)
 TFTP_ROOT_DIR = "/srv/tftp"
