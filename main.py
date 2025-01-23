@@ -7,6 +7,7 @@ import shutil
 import stat
 import time
 import threading
+import socket  # 추가
 
 os.environ['DISPLAY'] = ':0'
 
@@ -317,6 +318,21 @@ def show_context_menu(event):
 log_text.bind("<Button-3>", show_context_menu)
 
 # --------------------- (G) 시작 시 자동 설정 ---------------------- #
+def get_local_ip():
+    """
+    로컬 IP 주소를 반환합니다.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # 외부에 연결하지 않고도 로컬 IP를 얻을 수 있습니다.
+        s.connect(('8.8.8.8', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = '127.0.0.1'  # 실패 시 루프백 주소 반환
+    finally:
+        s.close()
+    return IP
+
 def on_start():
     # 1. GDSClientLinux 실행 권한 확인
     if not ensure_gdsclientlinux_executable():
@@ -327,13 +343,22 @@ def on_start():
         start_tftp_server()
 
     # 3. TFTP IP & Detector IP 자동 설정
-    #    - TFTP IP: 고정 "192.168.0.4"
-    #    - Detector IP: "192.168.0."까지만 미리 넣어둠 (마지막 옥텟은 사용자가 수정)
+    local_ip = get_local_ip()
+    async_log_print(f"[정보] 로컬 IP 주소 감지: {local_ip}")
+
+    # TFTP IP 설정
     tftp_ip_entry.delete(0, tk.END)
-    tftp_ip_entry.insert(0, "192.168.0.4")
+    tftp_ip_entry.insert(0, local_ip)
+
+    # Detector IP의 서브넷 설정 (예: "192.168.0.")
+    try:
+        base_ip = '.'.join(local_ip.split('.')[:3]) + '.'
+    except Exception:
+        base_ip = "192.168.0."  # 실패 시 기본값 사용
+        async_log_print("[경고] 로컬 IP 분석 실패, 기본값 '192.168.0.' 사용")
 
     detector_ip_entry.delete(0, tk.END)
-    detector_ip_entry.insert(0, "192.168.0.")  # 예: "192.168.0.5" 등을 입력하도록 유도
+    detector_ip_entry.insert(0, base_ip)
 
 # 메인 윈도우 표시 후 on_start 실행 (100ms 후)
 root.after(100, on_start)
