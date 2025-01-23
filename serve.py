@@ -203,7 +203,7 @@ def auto_upgrade_loop():
             break
 
         # 42초 ~ 300초 사이 랜덤 대기
-        wait_sec = random.randint(10, 300)
+        wait_sec = random.randint(42, 300)
         async_log_print(f"[자동모드] 다음 업그레이드까지 대기: {wait_sec}초")
         for _ in range(wait_sec):
             if stop_event.is_set():
