@@ -128,32 +128,42 @@ def copy_to_tftp(file_path):
         return False
 
 # ----- (E) 업그레이드 단일 실행 프로세스 (모드 전환 후 업그레이드) ----- #
-def upgrade_task(detector_ip, tftp_ip, upgrade_file_path):
+def upgrade_task(detector_ip, tftp_ip, upgrade_file_paths):
     """
     업그레이드 절차:
-    1) 파일을 TFTP 루트 디렉토리에 복사
-    2) TFTP 서버 실행
-    3) 디텍터를 업그레이드 모드로 변경 (cmd:4 1)
-    4) 잠시 대기 (2초)
-    5) 업그레이드 명령 (cmd:5, tftp_ip, file_name)
+    1) 파일 리스트 중 무작위 선택
+    2) 선택된 파일을 TFTP 루트 디렉토리에 복사
+    3) TFTP 서버 실행
+    4) 디텍터를 업그레이드 모드로 변경 (cmd:4 1)
+    5) 잠시 대기 (2초)
+    6) 업그레이드 명령 (cmd:5, tftp_ip, file_name)
     """
-    # 1. 파일 복사
-    if not copy_to_tftp(upgrade_file_path):
+    # 파일 리스트 파싱
+    files = [f.strip() for f in upgrade_file_paths.split(",") if f.strip()]
+    if not files:
+        async_log_print("[오류] 업그레이드할 파일이 선택되지 않았습니다.")
         return
-
+    
+    # 무작위 파일 선택
+    selected_file = random.choice(files)
+    
+    # 1. 파일 복사
+    if not copy_to_tftp(selected_file):
+        return
+    
     # 2. TFTP 서버 기동
     start_tftp_server()
-
+    
     # 3. 모드 변경
     ret1 = run_command_realtime([GDSCLIENT_PATH, detector_ip, "4", "1"])
     time.sleep(2)  # 디텍터가 모드 전환될 시간
-
+    
     # 4. 업그레이드
-    file_name = os.path.basename(upgrade_file_path)
+    file_name = os.path.basename(selected_file)
     ret2 = run_command_realtime([GDSCLIENT_PATH, detector_ip, "5", tftp_ip, file_name])
-
+    
     if ret2 == 0:
-        async_log_print("[알림] 업그레이드 명령을 성공적으로 마쳤습니다.")
+        async_log_print(f"[알림] 업그레이드 명령을 성공적으로 마쳤습니다. 사용된 파일: {file_name}")
     else:
         async_log_print("[알림] 업그레이드 명령 중 오류가 발생했습니다.")
 
@@ -161,15 +171,15 @@ def upgrade_task(detector_ip, tftp_ip, upgrade_file_path):
 def upgrade_once():
     detector_ip = detector_ip_entry.get().strip()
     tftp_ip = tftp_ip_entry.get().strip()
-    upgrade_file_path = file_entry.get().strip()
+    upgrade_file_paths = file_entry.get().strip()
 
-    if not detector_ip or not tftp_ip or not upgrade_file_path:
+    if not detector_ip or not tftp_ip or not upgrade_file_paths:
         messagebox.showwarning("경고", "모든 입력 항목(Detector IP, TFTP IP, 업그레이드 파일)을 입력하세요.")
         return
 
     threading.Thread(
         target=upgrade_task,
-        args=(detector_ip, tftp_ip, upgrade_file_path),
+        args=(detector_ip, tftp_ip, upgrade_file_paths),
         daemon=True
     ).start()
 
@@ -183,11 +193,11 @@ def auto_upgrade_loop():
     """
     detector_ip = detector_ip_entry.get().strip()
     tftp_ip = tftp_ip_entry.get().strip()
-    upgrade_file_path = file_entry.get().strip()
+    upgrade_file_paths = file_entry.get().strip()
 
     while not stop_event.is_set():
         # 업그레이드 실행
-        upgrade_task(detector_ip, tftp_ip, upgrade_file_path)
+        upgrade_task(detector_ip, tftp_ip, upgrade_file_paths)
 
         if stop_event.is_set():
             break
@@ -216,8 +226,8 @@ def start_auto_upgrade():
 
     detector_ip = detector_ip_entry.get().strip()
     tftp_ip = tftp_ip_entry.get().strip()
-    upgrade_file_path = file_entry.get().strip()
-    if not detector_ip or not tftp_ip or not upgrade_file_path:
+    upgrade_file_paths = file_entry.get().strip()
+    if not detector_ip or not tftp_ip or not upgrade_file_paths:
         messagebox.showwarning("경고", "모든 입력 항목(Detector IP, TFTP IP, 업그레이드 파일)을 입력하세요.")
         return
 
@@ -241,11 +251,12 @@ def stop_auto_upgrade():
         async_log_print("[자동모드] 현재 동작 중이 아닙니다.")
 
 # ----- (G) 파일 선택 ----- #
-def select_file():
-    filepath = filedialog.askopenfilename(title="업그레이드 파일 선택")
-    if filepath:
+def select_files():
+    filepaths = filedialog.askopenfilenames(title="업그레이드 파일 선택")
+    if filepaths:
         file_entry.delete(0, tk.END)
-        file_entry.insert(0, filepath)
+        # 파일 경로를 콤마로 구분하여 저장
+        file_entry.insert(0, ",".join(filepaths))
 
 # ============================================================== #
 # ======================= Tkinter UI 구성 ======================= #
@@ -258,7 +269,8 @@ info_label = tk.Label(
     text=(
         "GDSClientLinux를 이용하여 랜덤 간격(42~300초)으로\n"
         "자동 업그레이드를 반복 실행하는 테스트 툴입니다.\n"
-        "CPU Bug Test 등을 위해 무한 반복됩니다."
+        "CPU Bug Test 등을 위해 무한 반복됩니다.\n"
+        "업그레이드 파일을 여러 개 선택하면 업그레이드 시 무작위로 선택됩니다."
     ),
     fg="blue"
 )
@@ -281,9 +293,9 @@ frame_file = tk.Frame(root)
 frame_file.pack(padx=10, pady=5, fill="x")
 
 tk.Label(frame_file, text="업그레이드 파일:").grid(row=0, column=0, sticky="e")
-file_entry = tk.Entry(frame_file, width=40)
+file_entry = tk.Entry(frame_file, width=60)
 file_entry.grid(row=0, column=1, padx=5)
-file_btn = tk.Button(frame_file, text="파일 선택", command=select_file)
+file_btn = tk.Button(frame_file, text="파일 선택", command=select_files)
 file_btn.grid(row=0, column=2, padx=5)
 
 # 명령 버튼들 (자동 시작/중지, 단발 업그레이드)
