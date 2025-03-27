@@ -231,43 +231,37 @@ def upgrade_task(detector_ip, tftp_ip, upgrade_file_paths):
     ret2 = run_command_realtime([GDSCLIENT_PATH, detector_ip, "5", tftp_ip, file_name])
     
     if ret2 == 0:
-        async_log_print(f"[알림] {detector_ip} 업그레이드 명령을 성공적으로 마쳤습니다. 사용된 파일: {file_name}")
+        async_log_print(f"[알림] 업그레이드 명령을 성공적으로 마쳤습니다. 사용된 파일: {file_name}")
     else:
-        async_log_print(f"[알림] {detector_ip} 업그레이드 명령 중 오류가 발생했습니다.")
+        async_log_print("[알림] 업그레이드 명령 중 오류가 발생했습니다.")
 
-# --------------------- (G) 업그레이드(단발) 호출 함수 (다중 장비 지원) --------------------- #
-def get_detector_ips():
-    """
-    detector_ip_entry의 값을 콤마로 분리하여 IP 리스트로 반환합니다.
-    """
-    ip_text = detector_ip_entry.get().strip()
-    ips = [ip.strip() for ip in ip_text.split(",") if ip.strip()]
-    return ips
-
-def upgrade_once_multiple():
+# --------------------- (G) 업그레이드(단발) 호출 함수 --------------------- #
+def upgrade_once():
+    detector_ip = detector_ip_entry.get().strip()
     tftp_ip = tftp_ip_entry.get().strip()
     upgrade_file_paths = file_entry.get().strip()
-    detector_ips = get_detector_ips()
 
-    if not detector_ips or not tftp_ip or not upgrade_file_paths:
-        messagebox.showwarning("경고", "모든 입력 항목(Detector IP(들), TFTP IP, 업그레이드 파일)을 입력하세요.")
+    if not detector_ip or not tftp_ip or not upgrade_file_paths:
+        messagebox.showwarning("경고", "모든 입력 항목(Detector IP, TFTP IP, 업그레이드 파일)을 입력하세요.")
         return
 
-    # 각 detector IP마다 별도의 스레드에서 업그레이드 작업 수행
-    for ip in detector_ips:
-        threading.Thread(
-            target=upgrade_task,
-            args=(ip, tftp_ip, upgrade_file_paths),
-            daemon=True
-        ).start()
+    threading.Thread(
+        target=upgrade_task,
+        args=(detector_ip, tftp_ip, upgrade_file_paths),
+        daemon=True
+    ).start()
 
 # ============================================================
-# =============== 랜덤 반복 업그레이드 관련 로직 (다중 장비) ===============
+# =============== 랜덤 반복 업그레이드 관련 로직 ===============
 # ============================================================
-def auto_upgrade_loop_multiple():
+def auto_upgrade_loop():
+    """
+    stop_event가 꺼질 때까지
+    무작위 간격(42초 ~ 300초)으로 업그레이드를 반복 수행
+    """
+    detector_ip = detector_ip_entry.get().strip()
     tftp_ip = tftp_ip_entry.get().strip()
     upgrade_file_paths = file_entry.get().strip()
-    detector_ips = get_detector_ips()
 
     # 파일 리스트 파싱
     files = [f.strip() for f in upgrade_file_paths.split(",") if f.strip()]
@@ -276,20 +270,8 @@ def auto_upgrade_loop_multiple():
         return
 
     while not stop_event.is_set():
-        # 모든 detector IP에 대해 업그레이드 작업을 동시에 수행
-        threads = []
-        for ip in detector_ips:
-            th = threading.Thread(
-                target=upgrade_task,
-                args=(ip, tftp_ip, upgrade_file_paths),
-                daemon=True
-            )
-            th.start()
-            threads.append(th)
-
-        # 각 작업이 완료될 때까지 기다림
-        for th in threads:
-            th.join()
+        # 업그레이드 실행
+        upgrade_task(detector_ip, tftp_ip, upgrade_file_paths)
 
         if stop_event.is_set():
             break
@@ -302,7 +284,8 @@ def auto_upgrade_loop_multiple():
                 break
             time.sleep(1)
 
-def start_auto_upgrade_multiple():
+def start_auto_upgrade():
+    # 전역변수를 함수 내부에서 수정/참조하려면 첫 줄에 선언
     global auto_thread
 
     # GDSClientLinux 파일 체크
@@ -315,17 +298,19 @@ def start_auto_upgrade_multiple():
         async_log_print("[오류] tftpd-hpa 설치가 안 되어 업그레이드를 진행할 수 없습니다.")
         return
 
+    detector_ip = detector_ip_entry.get().strip()
     tftp_ip = tftp_ip_entry.get().strip()
     upgrade_file_paths = file_entry.get().strip()
-    detector_ips = get_detector_ips()
-    if not detector_ips or not tftp_ip or not upgrade_file_paths:
-        messagebox.showwarning("경고", "모든 입력 항목(Detector IP(들), TFTP IP, 업그레이드 파일)을 입력하세요.")
+    if not detector_ip or not tftp_ip or not upgrade_file_paths:
+        messagebox.showwarning("경고", "모든 입력 항목(Detector IP, TFTP IP, 업그레이드 파일)을 입력하세요.")
         return
 
+    # 이미 동작 중인지 확인
     if not auto_thread or not auto_thread.is_alive():
+        # 이벤트 초기화 후 스레드 시작
         stop_event.clear()
-        async_log_print("[자동모드] 다중 장비에 대해 무작위 업그레이드 시작")
-        auto_thread = threading.Thread(target=auto_upgrade_loop_multiple, daemon=True)
+        async_log_print("[자동모드] 무작위 업그레이드 시작")
+        auto_thread = threading.Thread(target=auto_upgrade_loop, daemon=True)
         auto_thread.start()
     else:
         async_log_print("[자동모드] 이미 동작 중입니다.")
@@ -354,10 +339,11 @@ def get_local_ip():
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
+        # 외부에 연결하지 않고도 로컬 IP를 얻을 수 있습니다.
         s.connect(('8.8.8.8', 1))
         IP = s.getsockname()[0]
     except Exception:
-        IP = '127.0.0.1'
+        IP = '127.0.0.1'  # 실패 시 루프백 주소 반환
     finally:
         s.close()
     return IP
@@ -369,7 +355,7 @@ def on_start():
     # 1. GDSClientLinux 실행 경로 가져오기
     GDSCLIENT_PATH = get_gdsclient_path()
     if not GDSCLIENT_PATH:
-        return
+        return  # 경로 설정 실패 시 종료
 
     # 2. GDSClientLinux 실행 권한 확인
     if not ensure_gdsclientlinux_executable():
@@ -383,13 +369,15 @@ def on_start():
     local_ip = get_local_ip()
     async_log_print(f"[정보] 로컬 IP 주소 감지: {local_ip}")
 
+    # TFTP IP 설정
     tftp_ip_entry.delete(0, tk.END)
     tftp_ip_entry.insert(0, local_ip)
 
+    # Detector IP의 서브넷 설정 (예: "192.168.0.")
     try:
         base_ip = '.'.join(local_ip.split('.')[:3]) + '.'
     except Exception:
-        base_ip = "192.168.0."
+        base_ip = "192.168.0."  # 실패 시 기본값 사용
         async_log_print("[경고] 로컬 IP 분석 실패, 기본값 '192.168.0.' 사용")
 
     detector_ip_entry.delete(0, tk.END)
@@ -399,14 +387,14 @@ def on_start():
 # ======================= Tkinter UI 구성 ======================= #
 # ============================================================== #
 root = tk.Tk()
-root.title("자동 업그레이드 테스트 UI (다중 장비)")
+root.title("자동 업그레이드 테스트 UI")
 
 info_label = tk.Label(
     root,
     text=(
         "GDSClientLinux를 이용하여 랜덤 간격(42~300초)으로\n"
         "자동 업그레이드를 반복 실행하는 테스트 툴입니다.\n"
-        "여러 장비(Detector IP)를 동시에 처리할 수 있습니다.\n"
+        "CPU Bug Test 등을 위해 무한 반복됩니다.\n"
         "업그레이드 파일을 여러 개 선택하면 업그레이드 시 무작위로 선택됩니다."
     ),
     fg="blue"
@@ -417,8 +405,8 @@ info_label.pack(padx=10, pady=5)
 frame_ip = tk.Frame(root)
 frame_ip.pack(padx=10, pady=5, fill="x")
 
-tk.Label(frame_ip, text="Detector IP(들):").grid(row=0, column=0, sticky="e")
-detector_ip_entry = tk.Entry(frame_ip, width=30)
+tk.Label(frame_ip, text="Detector IP:").grid(row=0, column=0, sticky="e")
+detector_ip_entry = tk.Entry(frame_ip, width=15)
 detector_ip_entry.grid(row=0, column=1, padx=5)
 
 tk.Label(frame_ip, text="TFTP IP:").grid(row=0, column=2, sticky="e")
@@ -439,13 +427,13 @@ file_btn.grid(row=0, column=2, padx=5)
 frame_buttons = tk.Frame(root)
 frame_buttons.pack(padx=10, pady=5)
 
-btn_start_auto = tk.Button(frame_buttons, text="자동 업그레이드 시작 (다중)", width=25, command=start_auto_upgrade_multiple)
+btn_start_auto = tk.Button(frame_buttons, text="자동 업그레이드 시작", width=20, command=start_auto_upgrade)
 btn_start_auto.grid(row=0, column=0, padx=5, pady=5)
 
-btn_stop_auto = tk.Button(frame_buttons, text="자동 업그레이드 중지", width=25, command=stop_auto_upgrade)
+btn_stop_auto = tk.Button(frame_buttons, text="자동 업그레이드 중지", width=20, command=stop_auto_upgrade)
 btn_stop_auto.grid(row=0, column=1, padx=5, pady=5)
 
-btn_upgrade_once = tk.Button(frame_buttons, text="단발 업그레이드 실행 (다중)", width=25, command=upgrade_once_multiple)
+btn_upgrade_once = tk.Button(frame_buttons, text="단발 업그레이드 실행", width=20, command=upgrade_once)
 btn_upgrade_once.grid(row=0, column=2, padx=5, pady=5)
 
 # 로그 창
@@ -465,6 +453,7 @@ def show_context_menu(event):
 log_text.bind("<Button-3>", show_context_menu)
 
 # --------------------- (K) 시작 시 자동 설정 --------------------- #
+# 메인 윈도우 표시 후 on_start 실행 (100ms 후)
 root.after(100, on_start)
 
 root.mainloop()
