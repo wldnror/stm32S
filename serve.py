@@ -378,7 +378,7 @@ def modbus_test():
     try:
         client = ModbusTcpClient(modbus_ip, port=502, timeout=3)
         if client.connect():
-            response = client.read_holding_registers(0, 1)
+            response = client.read_holding_registers(0, count=1)
             if not response.isError():
                 data = response.registers[0]
                 async_log_print(f"[Modbus 테스트] {modbus_ip} 연결 성공. 데이터: {data}")
