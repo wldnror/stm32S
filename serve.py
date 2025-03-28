@@ -395,65 +395,101 @@ def modbus_test():
         async_log_print(f"[Modbus 테스트] 예외 발생: {e}")
         messagebox.showerror("Modbus 테스트", f"예외 발생: {e}")
 
-# ============================================================== #
-# ======================= Tkinter UI 구성 ======================= #
-# ============================================================== #
-root = tk.Tk()
-root.title("자동 업그레이드 테스트 UI (다중 장비)")
+# ====================== Modbus Polling 기능 추가 ======================
+modbus_pollers = {}  # key: ip, value: ModbusPoller instance
+modbus_labels = {}   # key: ip, value: Label widget
 
-info_label = tk.Label(
-    root,
-    text=(
-        "GDSClientLinux를 이용하여 랜덤 간격(42~300초)으로\n"
-        "자동 업그레이드를 반복 실행하는 테스트 툴입니다.\n"
-        "여러 장비(Detector IP)를 동시에 처리할 수 있습니다.\n"
-        "업그레이드 파일을 여러 개 선택하면 업그레이드 시 무작위로 선택됩니다.\n\n"
-        "※ Modbus 테스트는 '장비 IP(들)' 입력란의 첫 번째 IP를 사용합니다."
-    ),
-    fg="blue"
-)
-info_label.pack(padx=10, pady=5)
+class ModbusPoller:
+    def __init__(self, ip, update_callback, poll_interval=0.2):
+        self.ip = ip
+        self.update_callback = update_callback  # UI 업데이트를 위한 콜백 함수
+        self.poll_interval = poll_interval
+        self.client = ModbusTcpClient(ip, port=502, timeout=1)
+        self.running = False
+        self.thread = None
 
-# IP 입력 프레임
-frame_ip = tk.Frame(root)
-frame_ip.pack(padx=10, pady=5, fill="x")
+    def start(self):
+        if not self.client.connect():
+            self.update_callback(self.ip, None, "연결 실패")
+            return
+        self.running = True
+        self.thread = threading.Thread(target=self.poll_loop, daemon=True)
+        self.thread.start()
 
-tk.Label(frame_ip, text="장비 IP(들):").grid(row=0, column=0, sticky="e")
-detector_ip_entry = tk.Entry(frame_ip, width=30)
-detector_ip_entry.grid(row=0, column=1, padx=5)
+    def poll_loop(self):
+        while self.running:
+            try:
+                response = self.client.read_holding_registers(0, 1)
+                if response.isError():
+                    self.update_callback(self.ip, None, "에러 발생")
+                else:
+                    data = response.registers[0]
+                    self.update_callback(self.ip, data, "정상")
+            except Exception as e:
+                self.update_callback(self.ip, None, f"예외: {e}")
+            time.sleep(self.poll_interval)
 
-tk.Label(frame_ip, text="TFTP IP:").grid(row=0, column=2, sticky="e")
-tftp_ip_entry = tk.Entry(frame_ip, width=15)
-tftp_ip_entry.grid(row=0, column=3, padx=5)
+    def stop(self):
+        self.running = False
+        if self.thread is not None:
+            self.thread.join(timeout=1)
+        self.client.close()
 
-# Modbus 테스트 버튼 (추가)
-modbus_test_btn = tk.Button(frame_ip, text="Modbus 테스트", command=modbus_test)
-modbus_test_btn.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+def update_modbus_label(ip, data, status):
+    def update():
+        text = f"IP: {ip} | 데이터: {data} | 상태: {status}"
+        if ip in modbus_labels:
+            modbus_labels[ip].config(text=text)
+        else:
+            lbl = tk.Label(frame_modbus, text=text, anchor="w")
+            lbl.pack(fill="x", padx=5, pady=2)
+            modbus_labels[ip] = lbl
+    root.after(0, update)
 
-# 파일 선택 프레임
-frame_file = tk.Frame(root)
-frame_file.pack(padx=10, pady=5, fill="x")
+def start_modbus_polling():
+    ip_text = detector_ip_entry.get().strip()
+    ips = [ip.strip() for ip in ip_text.split(",") if ip.strip()]
+    if not ips:
+        messagebox.showwarning("경고", "Modbus 폴링을 시작할 IP 주소를 입력하세요.")
+        return
+    for ip in ips:
+        if ip not in modbus_pollers:
+            poller = ModbusPoller(ip, update_modbus_label, poll_interval=0.2)
+            modbus_pollers[ip] = poller
+            poller.start()
+            async_log_print(f"[Modbus 폴링] {ip}에 대해 폴링 시작")
+        else:
+            async_log_print(f"[Modbus 폴링] {ip}는 이미 폴링 중입니다.")
 
-tk.Label(frame_file, text="업그레이드 파일:").grid(row=0, column=0, sticky="e")
-file_entry = tk.Entry(frame_file, width=60)
-file_entry.grid(row=0, column=1, padx=5)
-file_btn = tk.Button(frame_file, text="파일 선택", command=select_files)
-file_btn.grid(row=0, column=2, padx=5)
+def stop_modbus_polling():
+    for ip, poller in list(modbus_pollers.items()):
+        poller.stop()
+        async_log_print(f"[Modbus 폴링] {ip} 폴링 중지")
+        del modbus_pollers[ip]
 
-# 명령 버튼들 (자동 시작/중지, 단발 업그레이드)
+# ====================== Modbus Polling UI 추가 ======================
+frame_modbus = tk.Frame(root)
+frame_modbus.pack(padx=10, pady=5, fill="x")
+lbl_modbus_title = tk.Label(frame_modbus, text="Modbus Polling 데이터", fg="green", font=("Helvetica", 10, "bold"))
+lbl_modbus_title.pack(anchor="w", padx=5)
+
+# 명령 버튼들 (자동 시작/중지, 단발 업그레이드) UI 하단에 Modbus Polling 제어 버튼 추가
 frame_buttons = tk.Frame(root)
 frame_buttons.pack(padx=10, pady=5)
-
 btn_start_auto = tk.Button(frame_buttons, text="자동 업그레이드 시작 (다중)", width=25, command=start_auto_upgrade_multiple)
 btn_start_auto.grid(row=0, column=0, padx=5, pady=5)
-
 btn_stop_auto = tk.Button(frame_buttons, text="자동 업그레이드 중지", width=25, command=stop_auto_upgrade)
 btn_stop_auto.grid(row=0, column=1, padx=5, pady=5)
-
 btn_upgrade_once = tk.Button(frame_buttons, text="단발 업그레이드 실행 (다중)", width=25, command=upgrade_once_multiple)
 btn_upgrade_once.grid(row=0, column=2, padx=5, pady=5)
 
-# 로그 창
+# 추가: Modbus Polling 제어 버튼 (새로운 행)
+btn_start_modbus = tk.Button(frame_buttons, text="Modbus Polling 시작", width=25, command=start_modbus_polling)
+btn_start_modbus.grid(row=1, column=0, padx=5, pady=5)
+btn_stop_modbus = tk.Button(frame_buttons, text="Modbus Polling 중지", width=25, command=stop_modbus_polling)
+btn_stop_modbus.grid(row=1, column=1, padx=5, pady=5)
+
+# ----- 로그 창 -----
 log_text = scrolledtext.ScrolledText(root, width=80, height=15)
 log_text.pack(padx=10, pady=10)
 
