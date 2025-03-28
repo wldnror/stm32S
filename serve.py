@@ -11,6 +11,9 @@ import random
 import socket
 import json
 
+# 추가: pymodbus 모듈 임포트
+from pymodbus.client import ModbusTcpClient
+
 # 디스플레이 환경 변수 설정 (리눅스에서 GUI를 사용할 경우 필요)
 os.environ['DISPLAY'] = ':0'
 
@@ -362,38 +365,34 @@ def get_local_ip():
         s.close()
     return IP
 
-# --------------------- (J) 시작 시 자동 설정 --------------------- #
-def on_start():
-    global GDSCLIENT_PATH
-
-    # 1. GDSClientLinux 실행 경로 가져오기
-    GDSCLIENT_PATH = get_gdsclient_path()
-    if not GDSCLIENT_PATH:
+# --------------------- 추가: Modbus TCP 테스트 기능 --------------------- #
+def modbus_test():
+    """
+    입력한 Modbus TCP 서버 IP로 연결 후,
+    holding register 0번부터 1개를 읽어 결과를 로그와 메시지박스로 표시합니다.
+    """
+    modbus_ip = modbus_ip_entry.get().strip()
+    if not modbus_ip:
+        messagebox.showwarning("경고", "Modbus TCP 서버 IP를 입력하세요.")
         return
-
-    # 2. GDSClientLinux 실행 권한 확인
-    if not ensure_gdsclientlinux_executable():
-        async_log_print("[오류] GDSClientLinux 실행 권한 설정 실패 혹은 파일이 없습니다.")
-
-    # 3. tftpd-hpa 설치 확인 & 자동 설치
-    if check_and_install_tftpd():
-        start_tftp_server()
-
-    # 4. TFTP IP & Detector IP 자동 설정
-    local_ip = get_local_ip()
-    async_log_print(f"[정보] 로컬 IP 주소 감지: {local_ip}")
-
-    tftp_ip_entry.delete(0, tk.END)
-    tftp_ip_entry.insert(0, local_ip)
-
     try:
-        base_ip = '.'.join(local_ip.split('.')[:3]) + '.'
-    except Exception:
-        base_ip = "192.168.0."
-        async_log_print("[경고] 로컬 IP 분석 실패, 기본값 '192.168.0.' 사용")
-
-    detector_ip_entry.delete(0, tk.END)
-    detector_ip_entry.insert(0, base_ip)
+        client = ModbusTcpClient(modbus_ip, port=502, timeout=3)
+        if client.connect():
+            response = client.read_holding_registers(0, 1)
+            if not response.isError():
+                data = response.registers[0]
+                async_log_print(f"[Modbus 테스트] {modbus_ip} 연결 성공. 데이터: {data}")
+                messagebox.showinfo("Modbus 테스트", f"{modbus_ip} 연결 성공.\n데이터: {data}")
+            else:
+                async_log_print(f"[Modbus 테스트] {modbus_ip} 읽기 실패: {response}")
+                messagebox.showerror("Modbus 테스트", f"{modbus_ip} 읽기 실패: {response}")
+            client.close()
+        else:
+            async_log_print(f"[Modbus 테스트] {modbus_ip}에 연결할 수 없습니다.")
+            messagebox.showerror("Modbus 테스트", f"{modbus_ip}에 연결할 수 없습니다.")
+    except Exception as e:
+        async_log_print(f"[Modbus 테스트] 예외 발생: {e}")
+        messagebox.showerror("Modbus 테스트", f"예외 발생: {e}")
 
 # ============================================================== #
 # ======================= Tkinter UI 구성 ======================= #
@@ -435,6 +434,17 @@ file_entry.grid(row=0, column=1, padx=5)
 file_btn = tk.Button(frame_file, text="파일 선택", command=select_files)
 file_btn.grid(row=0, column=2, padx=5)
 
+# ------------------ 추가: Modbus TCP 테스트 UI ------------------ #
+frame_modbus = tk.Frame(root)
+frame_modbus.pack(padx=10, pady=5, fill="x")
+
+tk.Label(frame_modbus, text="Modbus TCP 서버 IP:").grid(row=0, column=0, sticky="e")
+modbus_ip_entry = tk.Entry(frame_modbus, width=20)
+modbus_ip_entry.grid(row=0, column=1, padx=5)
+btn_modbus_test = tk.Button(frame_modbus, text="Modbus 테스트", command=modbus_test)
+btn_modbus_test.grid(row=0, column=2, padx=5)
+# ------------------------------------------------------------- #
+
 # 명령 버튼들 (자동 시작/중지, 단발 업그레이드)
 frame_buttons = tk.Frame(root)
 frame_buttons.pack(padx=10, pady=5)
@@ -465,6 +475,38 @@ def show_context_menu(event):
 log_text.bind("<Button-3>", show_context_menu)
 
 # --------------------- (K) 시작 시 자동 설정 --------------------- #
+def on_start():
+    global GDSCLIENT_PATH
+
+    # 1. GDSClientLinux 실행 경로 가져오기
+    GDSCLIENT_PATH = get_gdsclient_path()
+    if not GDSCLIENT_PATH:
+        return
+
+    # 2. GDSClientLinux 실행 권한 확인
+    if not ensure_gdsclientlinux_executable():
+        async_log_print("[오류] GDSClientLinux 실행 권한 설정 실패 혹은 파일이 없습니다.")
+
+    # 3. tftpd-hpa 설치 확인 & 자동 설치
+    if check_and_install_tftpd():
+        start_tftp_server()
+
+    # 4. TFTP IP & Detector IP 자동 설정
+    local_ip = get_local_ip()
+    async_log_print(f"[정보] 로컬 IP 주소 감지: {local_ip}")
+
+    tftp_ip_entry.delete(0, tk.END)
+    tftp_ip_entry.insert(0, local_ip)
+
+    try:
+        base_ip = '.'.join(local_ip.split('.')[:3]) + '.'
+    except Exception:
+        base_ip = "192.168.0."
+        async_log_print("[경고] 로컬 IP 분석 실패, 기본값 '192.168.0.' 사용")
+
+    detector_ip_entry.delete(0, tk.END)
+    detector_ip_entry.insert(0, base_ip)
+
 root.after(100, on_start)
 
 root.mainloop()
