@@ -306,16 +306,15 @@ def modbus_test():
     try:
         client = ModbusTcpClient(modbus_ip, port=502, timeout=3)
         if client.connect():
-            # 연결 후 기본 unit_id(슬레이브 ID)를 설정합니다.
-            client.unit_id = 1
-            response = client.read_holding_registers(0, 1)
-            if not response.isError():
-                data = response.registers[0]
+            # 단일 레지스터 읽기
+            result = client.read_holding_registers(0)
+            if not result.isError():
+                data = result.registers[0]
                 async_log_print(f"[Modbus 테스트] {modbus_ip} 연결 성공. 데이터: {data}")
                 messagebox.showinfo("Modbus 테스트", f"{modbus_ip} 연결 성공.\n데이터: {data}")
             else:
-                async_log_print(f"[Modbus 테스트] {modbus_ip} 읽기 실패: {response}")
-                messagebox.showerror("Modbus 테스트", f"{modbus_ip} 읽기 실패: {response}")
+                async_log_print(f"[Modbus 테스트] {modbus_ip} 읽기 실패: {result}")
+                messagebox.showerror("Modbus 테스트", f"{modbus_ip} 읽기 실패: {result}")
             client.close()
         else:
             async_log_print(f"[Modbus 테스트] {modbus_ip}에 연결할 수 없습니다.")
@@ -341,33 +340,31 @@ class ModbusPoller:
         if not self.client.connect():
             self.update_callback(self.ip, None, "연결 실패")
             return
-        self.client.unit_id = 1  # 기본 슬레이브 ID 설정
+        # older 버전에서는 unit_id를 별도로 전달하지 않습니다.
         self.running = True
         self.thread = threading.Thread(target=self.poll_loop, daemon=True)
         self.thread.start()
 
     def poll_loop(self):
+        # pymodbus의 구버전에서는 read_holding_registers가 단일 레지스터만 지원하므로,
+        # 0번부터 10번까지 개별적으로 호출합니다.
         while self.running:
             try:
-                # 0번부터 10번까지 총 11개의 레지스터를 읽어옵니다.
-                response = self.client.read_holding_registers(0, 11)
-                if response.isError():
-                    self.update_callback(self.ip, None, "에러 발생")
-                else:
-                    regs = response.registers
-                    # 각 레지스터 값을 추출합니다.
-                    value_40001 = regs[0]
-                    value_40005 = regs[4]
-                    value_40007 = regs[7]
-                    value_40011 = regs[10]
-                    # 표시할 문자열 포맷 예시
-                    display_data = (
-                        f"40001: {value_40001}, "
-                        f"40005: {value_40005}, "
-                        f"40007: {value_40007}, "
-                        f"40011: {value_40011}"
-                    )
-                    self.update_callback(self.ip, display_data, "정상")
+                regs = []
+                for addr in range(11):
+                    result = self.client.read_holding_registers(addr)
+                    if result.isError():
+                        regs.append("err")
+                    else:
+                        regs.append(result.registers[0])
+                # 추출: 40001 -> regs[0], 40005 -> regs[4], 40007 -> regs[7], 40011 -> regs[10]
+                display_data = (
+                    f"40001: {regs[0]}, "
+                    f"40005: {regs[4]}, "
+                    f"40007: {regs[7]}, "
+                    f"40011: {regs[10]}"
+                )
+                self.update_callback(self.ip, display_data, "정상")
             except Exception as e:
                 self.update_callback(self.ip, None, f"예외: {e}")
             time.sleep(self.poll_interval)
