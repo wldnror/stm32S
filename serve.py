@@ -253,7 +253,7 @@ def upgrade_once_multiple():
     detector_ips = get_detector_ips()
 
     if not detector_ips or not tftp_ip or not upgrade_file_paths:
-        messagebox.showwarning("경고", "모든 입력 항목(Detector IP(들), TFTP IP, 업그레이드 파일)을 입력하세요.")
+        messagebox.showwarning("경고", "모든 입력 항목(장비 IP(들), TFTP IP, 업그레이드 파일)을 입력하세요.")
         return
 
     # 각 detector IP마다 별도의 스레드에서 업그레이드 작업 수행
@@ -322,7 +322,7 @@ def start_auto_upgrade_multiple():
     upgrade_file_paths = file_entry.get().strip()
     detector_ips = get_detector_ips()
     if not detector_ips or not tftp_ip or not upgrade_file_paths:
-        messagebox.showwarning("경고", "모든 입력 항목(Detector IP(들), TFTP IP, 업그레이드 파일)을 입력하세요.")
+        messagebox.showwarning("경고", "모든 입력 항목(장비 IP(들), TFTP IP, 업그레이드 파일)을 입력하세요.")
         return
 
     if not auto_thread or not auto_thread.is_alive():
@@ -365,16 +365,17 @@ def get_local_ip():
         s.close()
     return IP
 
-# --------------------- 추가: Modbus TCP 테스트 기능 --------------------- #
+# --------------------- 추가: Modbus TCP 테스트 기능 (통합 IP 입력란 사용) --------------------- #
 def modbus_test():
     """
-    입력한 Modbus TCP 서버 IP로 연결 후,
-    holding register 0번부터 1개를 읽어 결과를 로그와 메시지박스로 표시합니다.
+    Detector IP(들) 입력란에 입력된 IP들 중 첫 번째 IP로 Modbus TCP 연결 테스트를 수행합니다.
+    여러 IP가 입력된 경우, 첫 번째 IP로 테스트합니다.
     """
-    modbus_ip = modbus_ip_entry.get().strip()
-    if not modbus_ip:
-        messagebox.showwarning("경고", "Modbus TCP 서버 IP를 입력하세요.")
+    ip_text = detector_ip_entry.get().strip()
+    if not ip_text:
+        messagebox.showwarning("경고", "장비 IP(들)를 입력하세요.")
         return
+    modbus_ip = ip_text.split(",")[0].strip()
     try:
         client = ModbusTcpClient(modbus_ip, port=502, timeout=3)
         if client.connect():
@@ -406,7 +407,8 @@ info_label = tk.Label(
         "GDSClientLinux를 이용하여 랜덤 간격(42~300초)으로\n"
         "자동 업그레이드를 반복 실행하는 테스트 툴입니다.\n"
         "여러 장비(Detector IP)를 동시에 처리할 수 있습니다.\n"
-        "업그레이드 파일을 여러 개 선택하면 업그레이드 시 무작위로 선택됩니다."
+        "업그레이드 파일을 여러 개 선택하면 업그레이드 시 무작위로 선택됩니다.\n\n"
+        "※ Modbus 테스트는 '장비 IP(들)' 입력란의 첫 번째 IP를 사용합니다."
     ),
     fg="blue"
 )
@@ -416,13 +418,17 @@ info_label.pack(padx=10, pady=5)
 frame_ip = tk.Frame(root)
 frame_ip.pack(padx=10, pady=5, fill="x")
 
-tk.Label(frame_ip, text="Detector IP(들):").grid(row=0, column=0, sticky="e")
+tk.Label(frame_ip, text="장비 IP(들):").grid(row=0, column=0, sticky="e")
 detector_ip_entry = tk.Entry(frame_ip, width=30)
 detector_ip_entry.grid(row=0, column=1, padx=5)
 
 tk.Label(frame_ip, text="TFTP IP:").grid(row=0, column=2, sticky="e")
 tftp_ip_entry = tk.Entry(frame_ip, width=15)
 tftp_ip_entry.grid(row=0, column=3, padx=5)
+
+# Modbus 테스트 버튼 (추가)
+modbus_test_btn = tk.Button(frame_ip, text="Modbus 테스트", command=modbus_test)
+modbus_test_btn.grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
 # 파일 선택 프레임
 frame_file = tk.Frame(root)
@@ -433,17 +439,6 @@ file_entry = tk.Entry(frame_file, width=60)
 file_entry.grid(row=0, column=1, padx=5)
 file_btn = tk.Button(frame_file, text="파일 선택", command=select_files)
 file_btn.grid(row=0, column=2, padx=5)
-
-# ------------------ 추가: Modbus TCP 테스트 UI ------------------ #
-frame_modbus = tk.Frame(root)
-frame_modbus.pack(padx=10, pady=5, fill="x")
-
-tk.Label(frame_modbus, text="Modbus TCP 서버 IP:").grid(row=0, column=0, sticky="e")
-modbus_ip_entry = tk.Entry(frame_modbus, width=20)
-modbus_ip_entry.grid(row=0, column=1, padx=5)
-btn_modbus_test = tk.Button(frame_modbus, text="Modbus 테스트", command=modbus_test)
-btn_modbus_test.grid(row=0, column=2, padx=5)
-# ------------------------------------------------------------- #
 
 # 명령 버튼들 (자동 시작/중지, 단발 업그레이드)
 frame_buttons = tk.Frame(root)
@@ -491,7 +486,7 @@ def on_start():
     if check_and_install_tftpd():
         start_tftp_server()
 
-    # 4. TFTP IP & Detector IP 자동 설정
+    # 4. TFTP IP & 장비 IP 자동 설정
     local_ip = get_local_ip()
     async_log_print(f"[정보] 로컬 IP 주소 감지: {local_ip}")
 
