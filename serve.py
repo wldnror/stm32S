@@ -328,7 +328,7 @@ modbus_pollers = {}  # key: ip, value: ModbusPoller instance
 modbus_labels = {}   # key: ip, value: Label widget
 
 class ModbusPoller:
-    def __init__(self, ip, update_callback, poll_interval=0.5):
+    def __init__(self, ip, update_callback, poll_interval=0.1):
         self.ip = ip
         self.update_callback = update_callback
         self.poll_interval = poll_interval
