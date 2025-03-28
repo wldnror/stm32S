@@ -10,6 +10,8 @@ import threading
 import random
 import socket
 import json
+root = tk.Tk()
+root.title("자동 업그레이드 테스트 UI (다중 장비)")
 
 # 추가: pymodbus 모듈 임포트
 from pymodbus.client import ModbusTcpClient
