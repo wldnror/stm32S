@@ -306,8 +306,9 @@ def modbus_test():
     try:
         client = ModbusTcpClient(modbus_ip, port=502, timeout=3)
         if client.connect():
-            # 키워드 인자를 사용하여 호출 (unit=1 기본 사용)
-            response = client.read_holding_registers(address=0, count=1, unit=1)
+            # 연결 후 기본 unit_id(슬레이브 ID)를 설정합니다.
+            client.unit_id = 1
+            response = client.read_holding_registers(0, 1)
             if not response.isError():
                 data = response.registers[0]
                 async_log_print(f"[Modbus 테스트] {modbus_ip} 연결 성공. 데이터: {data}")
@@ -340,6 +341,7 @@ class ModbusPoller:
         if not self.client.connect():
             self.update_callback(self.ip, None, "연결 실패")
             return
+        self.client.unit_id = 1  # 기본 슬레이브 ID 설정
         self.running = True
         self.thread = threading.Thread(target=self.poll_loop, daemon=True)
         self.thread.start()
@@ -348,7 +350,7 @@ class ModbusPoller:
         while self.running:
             try:
                 # 0번부터 10번까지 총 11개의 레지스터를 읽어옵니다.
-                response = self.client.read_holding_registers(address=0, count=11, unit=1)
+                response = self.client.read_holding_registers(0, 11)
                 if response.isError():
                     self.update_callback(self.ip, None, "에러 발생")
                 else:
