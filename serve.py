@@ -1,967 +1,507 @@
 #!/usr/bin/env python3
-import json
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+import subprocess
 import os
+import shutil
+import stat
 import time
-from tkinter import Frame, Canvas, StringVar, Entry, Button, Toplevel, Tk, Label
 import threading
+import random
+import socket
+import json
+
+# 추가: pymodbus 모듈 임포트
 from pymodbus.client import ModbusTcpClient
-from pymodbus.exceptions import ConnectionException, ModbusIOException
-from rich.console import Console
-from PIL import Image, ImageTk
 
-# 외부 파일에서 임포트 (가정)
-from common import SEGMENTS, BIT_TO_SEGMENT, create_segment_display, create_gradient_bar
-from virtual_keyboard import VirtualKeyboard
+# 디스플레이 환경 변수 설정 (리눅스에서 GUI를 사용할 경우 필요)
+os.environ['DISPLAY'] = ':0'
 
-import queue
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+# 1) 설정 파일 경로 설정
+CONFIG_FILE = os.path.expanduser("~/.gds_client_config_auto_upgrade.json")
 
-SCALE_FACTOR = 1.65
+# 2) TFTP 서버 루트 디렉토리 (실제 환경에 맞게 수정)
+TFTP_ROOT_DIR = "/srv/tftp"
+# <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-class ModbusUI:
-    SETTINGS_FILE = "modbus_settings.json"
-    GAS_FULL_SCALE = {
-        "ORG": 9999,
-        "ARF-T": 5000,
-        "HMDS": 3000,
-        "HC-100": 5000
-    }
+# 전역 스레드/이벤트 객체
+auto_thread = None                 # 자동 업그레이드 반복 스레드
+stop_event = threading.Event()     # 중지 신호 전달용 이벤트
 
-    GAS_TYPE_POSITIONS = {
-        "ORG":    (int(115 * SCALE_FACTOR), int(100 * SCALE_FACTOR)),
-        "ARF-T":  (int(107 * SCALE_FACTOR), int(100 * SCALE_FACTOR)),
-        "HMDS":   (int(110 * SCALE_FACTOR), int(100 * SCALE_FACTOR)),
-        "HC-100": (int(104 * SCALE_FACTOR), int(100 * SCALE_FACTOR))
-    }
+# --------------------- (A) 로그 업데이트를 안전하게 수행하는 함수 --------------------- #
+def async_log_print(msg: str):
+    """
+    다른 스레드에서 호출하면,
+    메인 스레드가 log_text에 안전하게 append하도록 해준다.
+    """
+    def insert_log():
+        log_text.insert(tk.END, msg.rstrip() + "\n")
+        log_text.see(tk.END)  # 자동 스크롤
+    root.after(0, insert_log)
 
-    def __init__(self, parent, num_boxes, gas_types, alarm_callback):
-        self.parent = parent
-        self.alarm_callback = alarm_callback
-        self.virtual_keyboard = VirtualKeyboard(parent)
-        self.ip_vars = [StringVar() for _ in range(num_boxes)]
-        self.entries = []
-        self.action_buttons = []
-        self.clients = {}
-        self.connected_clients = {}
-        self.stop_flags = {}
-        self.data_queue = queue.Queue()
-        self.ui_update_queue = queue.Queue()
-        self.console = Console()
-        self.box_states = []
-        self.box_frames = []
-        self.box_data = []
-        self.gradient_bar = create_gradient_bar(int(120 * SCALE_FACTOR), int(5 * SCALE_FACTOR))
-        self.gas_types = gas_types
+# --------------------- (B) 실시간 출력 받는 subprocess 실행 함수 --------------------- #
+def run_command_realtime(args):
+    """
+    subprocess.Popen으로 args를 실행하고,
+    stdout을 한 줄씩 읽어 async_log_print로 실시간 표시한다.
+    결과 코드(0=성공, 그 외=에러)를 리턴.
+    """
+    try:
+        p = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True
+        )
+    except FileNotFoundError:
+        async_log_print(f"[오류] 실행 파일을 찾을 수 없습니다: {args[0]}")
+        return -1
 
-        # 연결 끊김 관련 관리
-        self.disconnection_counts = [0] * num_boxes
-        self.disconnection_labels = [None] * num_boxes
-        self.auto_reconnect_failed = [False] * num_boxes  # 자동 재연결 5회 실패 여부
-        self.reconnect_attempt_labels = [None] * num_boxes
+    while True:
+        line = p.stdout.readline()
+        if not line:
+            break
+        async_log_print(line)
 
-        self.load_ip_settings(num_boxes)
+    p.wait()
+    return p.returncode
 
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        connect_image_path = os.path.join(script_dir, "img/on.png")
-        disconnect_image_path = os.path.join(script_dir, "img/off.png")
+# --------------------- (C) 설정 파일 관리 함수 --------------------- #
+def load_config():
+    """
+    설정 파일을 로드하여 딕셔너리로 반환합니다.
+    설정 파일이 없거나 읽을 수 없는 경우 빈 딕셔너리를 반환합니다.
+    """
+    if not os.path.isfile(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        async_log_print(f"[오류] 설정 파일을 로드할 수 없습니다: {e}")
+        return {}
 
-        self.connect_image = self.load_image(connect_image_path, (int(50 * SCALE_FACTOR), int(70 * SCALE_FACTOR)))
-        self.disconnect_image = self.load_image(disconnect_image_path, (int(50 * SCALE_FACTOR), int(70 * SCALE_FACTOR)))
+def save_config(config):
+    """
+    딕셔너리를 설정 파일로 저장합니다.
+    """
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=4)
+    except Exception as e:
+        async_log_print(f"[오류] 설정 파일을 저장할 수 없습니다: {e}")
 
-        for i in range(num_boxes):
-            self.create_modbus_box(i)
+def select_gdsclientlinux():
+    """
+    사용자에게 GDSClientLinux 실행 파일을 선택하도록 요청하고, 설정 파일에 저장합니다.
+    """
+    filepath = filedialog.askopenfilename(
+        title="GDSClientLinux 실행 파일 선택",
+        filetypes=[("Executable Files", "GDSClientLinux"), ("All Files", "*.*")]
+    )
+    if filepath:
+        config = load_config()
+        config['GDSCLIENT_PATH'] = filepath
+        save_config(config)
+        async_log_print(f"[설정] GDSClientLinux 경로가 설정되었습니다: {filepath}")
+        return filepath
+    else:
+        async_log_print("[경고] GDSClientLinux 실행 파일을 선택하지 않았습니다.")
+        return None
 
-        self.communication_interval = 0.2  # 200ms 주기
-        self.blink_interval = int(self.communication_interval * 1000)
-        self.alarm_blink_interval = 1000
-
-        self.start_data_processing_thread()
-        self.schedule_ui_update()
-        self.parent.bind("<Button-1>", self.check_click)
-
-    def load_ip_settings(self, num_boxes):
-        """
-        settings 파일에서 IP 목록을 읽어서 self.ip_vars에 저장
-        """
-        if os.path.exists(self.SETTINGS_FILE):
-            with open(self.SETTINGS_FILE, 'r') as file:
-                ip_settings = json.load(file)
-                for i in range(min(num_boxes, len(ip_settings))):
-                    self.ip_vars[i].set(ip_settings[i])
+def get_gdsclient_path():
+    """
+    설정 파일에서 GDSClientLinux 경로를 불러오거나, 경로가 유효하지 않으면 사용자에게 선택을 요청합니다.
+    """
+    config = load_config()
+    gds_path = config.get('GDSCLIENT_PATH', None)
+    if gds_path and os.path.isfile(gds_path):
+        return gds_path
+    else:
+        async_log_print("[정보] GDSClientLinux 경로가 설정되지 않았거나 유효하지 않습니다.")
+        gds_path = select_gdsclientlinux()
+        if gds_path:
+            return gds_path
         else:
-            self.ip_vars = [StringVar() for _ in range(num_boxes)]
-
-    def load_image(self, path, size):
-        img = Image.open(path).convert("RGBA")
-        img.thumbnail(size, Image.LANCZOS)
-        return ImageTk.PhotoImage(img)
-
-    def add_ip_row(self, frame, ip_var, index):
-        """
-        IP 입력부분, 입력 상자(Entry) + 연결버튼
-        """
-        entry_border = Frame(frame, bg="#4a4a4a", bd=1, relief='solid')
-        entry_border.grid(row=0, column=0, padx=(0, 0), pady=5)
-
-        entry = Entry(
-            entry_border,
-            textvariable=ip_var,
-            width=int(7 * SCALE_FACTOR),
-            highlightthickness=0,
-            bd=0,
-            relief='flat',
-            bg="#2e2e2e",
-            fg="white",
-            insertbackground="white",
-            font=("Helvetica", int(10 * SCALE_FACTOR)),
-            justify='center'
-        )
-        entry.pack(padx=2, pady=3)
-
-        placeholder_text = f"{index + 1}. IP를 입력해주세요."
-        if ip_var.get() == '':
-            entry.insert(0, placeholder_text)
-            entry.config(fg="#a9a9a9")
-        else:
-            entry.config(fg="white")
-
-        # --------------------
-        # 포커스 인/아웃 바인딩
-        # --------------------
-        def on_focus_in(event, e=entry, p=placeholder_text):
-            if e['state'] == 'normal':
-                if e.get() == p:
-                    e.delete(0, "end")
-                    e.config(fg="white")
-                entry_border.config(bg="#1e90ff")
-                e.config(bg="#3a3a3a")
-
-        def on_focus_out(event, e=entry, p=placeholder_text):
-            if e['state'] == 'normal':
-                if not e.get():
-                    e.insert(0, p)
-                    e.config(fg="#a9a9a9")
-                entry_border.config(bg="#4a4a4a")
-                e.config(bg="#2e2e2e")
-
-        def on_entry_click(event, e=entry, p=placeholder_text):
-            if e['state'] == 'normal':
-                on_focus_in(event, e, p)
-                self.show_virtual_keyboard(e)
-
-        entry.bind("<FocusIn>", on_focus_in)
-        entry.bind("<FocusOut>", on_focus_out)
-        entry.bind("<Button-1>", on_entry_click)
-
-        # 연결/해제 버튼
-        action_button = Button(
-            frame,
-            image=self.connect_image,
-            command=lambda i=index: self.toggle_connection(i),
-            width=int(60 * SCALE_FACTOR),
-            height=int(40 * SCALE_FACTOR),
-            bd=0,
-            highlightthickness=0,
-            borderwidth=0,
-            relief='flat',
-            bg='black',
-            activebackground='black',
-            cursor="hand2"
-        )
-        action_button.grid(row=0, column=1)
-        self.action_buttons.append(action_button)
-
-        self.entries.append(entry)
-
-    def show_virtual_keyboard(self, entry):
-        """
-        터치스크린용 가상 키보드
-        """
-        self.virtual_keyboard.show(entry)
-        entry.focus_set()
-
-    def create_modbus_box(self, index):
-        """
-        아날로그박스(캔버스+테두리+IP입력+알람램프 등) 생성
-        """
-
-        # -----------------------------
-        # highlightthickness=7 로 예시
-        # -----------------------------
-        box_frame = Frame(self.parent, highlightthickness=7)
-
-        inner_frame = Frame(box_frame)
-        inner_frame.pack(padx=0, pady=0)
-
-        box_canvas = Canvas(
-            inner_frame,
-            width=int(150 * SCALE_FACTOR),
-            height=int(300 * SCALE_FACTOR),
-            highlightthickness=int(3 * SCALE_FACTOR),
-            highlightbackground="#000000",
-            highlightcolor="#000000",
-            bg="#1e1e1e"
-        )
-        box_canvas.pack()
-
-        # 윗부분 회색, 아랫부분 검정 영역
-        box_canvas.create_rectangle(
-            0, 0,
-            int(160 * SCALE_FACTOR), int(200 * SCALE_FACTOR),
-            fill='grey', outline='grey', tags='border'
-        )
-        box_canvas.create_rectangle(
-            0, int(200 * SCALE_FACTOR),
-            int(260 * SCALE_FACTOR), int(310 * SCALE_FACTOR),
-            fill='black', outline='grey', tags='border'
-        )
-
-        create_segment_display(box_canvas)
-
-        self.box_states.append({
-            "blink_state": False,
-            "blinking_error": False,
-            "previous_value_40011": None,
-            "previous_segment_display": None,
-            "pwr_blink_state": False,
-            "pwr_blinking": False,
-            "gas_type_var": StringVar(value=self.gas_types.get(f"modbus_box_{index}", "ORG")),
-            "gas_type_text_id": None,
-            "full_scale": self.GAS_FULL_SCALE[self.gas_types.get(f"modbus_box_{index}", "ORG")],
-            "alarm1_on": False,
-            "alarm2_on": False,
-            "alarm1_blinking": False,
-            "alarm2_blinking": False,
-            "alarm_border_blink": False,
-            "border_blink_state": False,
-            "gms1000_text_id": None
-        })
-
-        # Box 안쪽 IP 입력+버튼 컨트롤
-        control_frame = Frame(box_canvas, bg="black")
-        control_frame.place(x=int(10 * SCALE_FACTOR), y=int(210 * SCALE_FACTOR))
-
-        ip_var = self.ip_vars[index]
-        self.add_ip_row(control_frame, ip_var, index)
-
-        # DC/재연결 라벨
-        disconnection_label = Label(
-            control_frame,
-            text=f"DC: {self.disconnection_counts[index]}",
-            fg="white",
-            bg="black",
-            font=("Helvetica", int(10 * SCALE_FACTOR))
-        )
-        disconnection_label.grid(row=1, column=0, columnspan=2, pady=(2,0))
-        self.disconnection_labels[index] = disconnection_label
-
-        reconnect_label = Label(
-            control_frame,
-            text="Reconnect: 0/5",
-            fg="yellow",
-            bg="black",
-            font=("Helvetica", int(10 * SCALE_FACTOR))
-        )
-        reconnect_label.grid(row=2, column=0, columnspan=2, pady=(2,0))
-        self.reconnect_attempt_labels[index] = reconnect_label
-
-        # 프로그램 시작 시에는 DC/재연결 라벨 숨김
-        disconnection_label.grid_remove()
-        reconnect_label.grid_remove()
-
-        # AL1, AL2, PWR, FUT 원(램프)
-        circle_al1 = box_canvas.create_oval(
-            int(77 * SCALE_FACTOR) - int(20 * SCALE_FACTOR),
-            int(200 * SCALE_FACTOR) - int(32 * SCALE_FACTOR),
-            int(87 * SCALE_FACTOR) - int(20 * SCALE_FACTOR),
-            int(190 * SCALE_FACTOR) - int(32 * SCALE_FACTOR)
-        )
-        box_canvas.create_text(
-            int(95 * SCALE_FACTOR) - int(25 * SCALE_FACTOR),
-            int(222 * SCALE_FACTOR) - int(40 * SCALE_FACTOR),
-            text="AL1",
-            fill="#cccccc",
-            anchor="e"
-        )
-
-        circle_al2 = box_canvas.create_oval(
-            int(133 * SCALE_FACTOR) - int(30 * SCALE_FACTOR),
-            int(200 * SCALE_FACTOR) - int(32 * SCALE_FACTOR),
-            int(123 * SCALE_FACTOR) - int(30 * SCALE_FACTOR),
-            int(190 * SCALE_FACTOR) - int(32 * SCALE_FACTOR)
-        )
-        box_canvas.create_text(
-            int(140 * SCALE_FACTOR) - int(35 * SCALE_FACTOR),
-            int(222 * SCALE_FACTOR) - int(40 * SCALE_FACTOR),
-            text="AL2",
-            fill="#cccccc",
-            anchor="e"
-        )
-
-        circle_pwr = box_canvas.create_oval(
-            int(30 * SCALE_FACTOR) - int(10 * SCALE_FACTOR),
-            int(200 * SCALE_FACTOR) - int(32 * SCALE_FACTOR),
-            int(40 * SCALE_FACTOR) - int(10 * SCALE_FACTOR),
-            int(190 * SCALE_FACTOR) - int(32 * SCALE_FACTOR)
-        )
-        box_canvas.create_text(
-            int(35 * SCALE_FACTOR) - int(10 * SCALE_FACTOR),
-            int(222 * SCALE_FACTOR) - int(40 * SCALE_FACTOR),
-            text="PWR",
-            fill="#cccccc",
-            anchor="center"
-        )
-
-        circle_fut = box_canvas.create_oval(
-            int(171 * SCALE_FACTOR) - int(40 * SCALE_FACTOR),
-            int(200 * SCALE_FACTOR) - int(32 * SCALE_FACTOR),
-            int(181 * SCALE_FACTOR) - int(40 * SCALE_FACTOR),
-            int(190 * SCALE_FACTOR) - int(32 * SCALE_FACTOR)
-        )
-        box_canvas.create_text(
-            int(175 * SCALE_FACTOR) - int(40 * SCALE_FACTOR),
-            int(217 * SCALE_FACTOR) - int(40 * SCALE_FACTOR),
-            text="FUT",
-            fill="#cccccc",
-            anchor="n"
-        )
-
-        # GAS 타입 표시
-        gas_type_var = self.box_states[index]["gas_type_var"]
-        gas_type_text_id = box_canvas.create_text(
-            *self.GAS_TYPE_POSITIONS[gas_type_var.get()],
-            text=gas_type_var.get(),
-            font=("Helvetica", int(16 * SCALE_FACTOR), "bold"),
-            fill="#cccccc",
-            anchor="center"
-        )
-        self.box_states[index]["gas_type_text_id"] = gas_type_text_id
-
-        # GMS-1000 표시 (하단)
-        gms1000_text_id = box_canvas.create_text(
-            int(80 * SCALE_FACTOR),
-            int(270 * SCALE_FACTOR),
-            text="GMS-1000",
-            font=("Helvetica", int(16 * SCALE_FACTOR), "bold"),
-            fill="#cccccc",
-            anchor="center"
-        )
-        self.box_states[index]["gms1000_text_id"] = gms1000_text_id
-
-        box_canvas.create_text(
-            int(80 * SCALE_FACTOR),
-            int(295 * SCALE_FACTOR),
-            text="GDS ENGINEERING CO.,LTD",
-            font=("Helvetica", int(7 * SCALE_FACTOR), "bold"),
-            fill="#cccccc",
-            anchor="center"
-        )
-
-        # Bar (그래프)
-        bar_canvas = Canvas(
-            box_canvas,
-            width=int(120 * SCALE_FACTOR),
-            height=int(5 * SCALE_FACTOR),
-            bg="white",
-            highlightthickness=0
-        )
-        bar_canvas.place(x=int(18.5 * SCALE_FACTOR), y=int(75 * SCALE_FACTOR))
-
-        bar_image = ImageTk.PhotoImage(self.gradient_bar)
-        bar_item = bar_canvas.create_image(0, 0, anchor='nw', image=bar_image)
-
-        self.box_frames.append(box_frame)
-        self.box_data.append((box_canvas,
-                              [circle_al1, circle_al2, circle_pwr, circle_fut],
-                              bar_canvas, bar_image, bar_item))
-
-        # 초기 상태: Bar 숨김 + 알람 OFF
-        self.show_bar(index, show=False)
-        self.update_circle_state([False, False, False, False], box_index=index)
-
-    def update_full_scale(self, gas_type_var, box_index):
-        """
-        GAS 타입 바뀌면 Full Scale 갱신 + 위치/텍스트 갱신
-        """
-        gas_type = gas_type_var.get()
-        full_scale = self.GAS_FULL_SCALE[gas_type]
-        self.box_states[box_index]["full_scale"] = full_scale
-
-        box_canvas = self.box_data[box_index][0]
-        position = self.GAS_TYPE_POSITIONS[gas_type]
-        box_canvas.coords(self.box_states[box_index]["gas_type_text_id"], *position)
-        box_canvas.itemconfig(self.box_states[box_index]["gas_type_text_id"], text=gas_type)
-
-    def update_circle_state(self, states, box_index=0):
-        """
-        AL1, AL2, PWR, FUT 램프 색상 업데이트
-        """
-        box_canvas, circle_items, _, _, _ = self.box_data[box_index]
-        colors_on = ['red', 'red', 'green', 'yellow']
-        colors_off = ['#fdc8c8', '#fdc8c8', '#e0fbba', '#fcf1bf']
-
-        for i, state in enumerate(states):
-            color = colors_on[i] if state else colors_off[i]
-            box_canvas.itemconfig(circle_items[i], fill=color, outline=color)
-
-        alarm_active = states[0] or states[1]
-        self.alarm_callback(alarm_active, f"modbus_{box_index}")
-
-    def update_segment_display(self, value, box_index=0, blink=False):
-        """
-        세그먼트 디스플레이 (4자리)
-        """
-        box_canvas = self.box_data[box_index][0]
-        value = value.zfill(4)  # 4글자 미만이면 앞에 0추가
-        prev_val = self.box_states[box_index]["previous_segment_display"]
-
-        if value != prev_val:
-            self.box_states[box_index]["previous_segment_display"] = value
-
-        leading_zero = True
-        for idx, digit in enumerate(value):
-            if leading_zero and digit == '0' and idx < 3:
-                segments = SEGMENTS[' ']
-            else:
-                segments = SEGMENTS.get(digit, SEGMENTS[' '])
-                leading_zero = False
-
-            # blink=True & blink_state=True → 공백
-            if blink and self.box_states[box_index]["blink_state"]:
-                segments = SEGMENTS[' ']
-
-            for j, seg_on in enumerate(segments):
-                color = '#fc0c0c' if seg_on == '1' else '#424242'
-                segment_tag = f'segment_{idx}_{chr(97 + j)}'
-                if box_canvas.segment_canvas.find_withtag(segment_tag):
-                    box_canvas.segment_canvas.itemconfig(segment_tag, fill=color)
-
-        self.box_states[box_index]["blink_state"] = not self.box_states[box_index]["blink_state"]
-
-    def toggle_connection(self, i):
-        """
-        연결or해제 토글
-        """
-        if self.ip_vars[i].get() in self.connected_clients:
-            # 연결돼 있으면 → 해제
-            self.disconnect(i, manual=True)
-        else:
-            # 연결 안돼 있으면 → 연결 시도
-            threading.Thread(target=self.connect, args=(i,), daemon=True).start()
-
-    def connect(self, i):
-        ip = self.ip_vars[i].get()
-
-        if self.auto_reconnect_failed[i]:
-            self.disconnection_counts[i] = 0
-            self.disconnection_labels[i].config(text="DC: 0")
-            self.auto_reconnect_failed[i] = False
-
-        if ip and ip not in self.connected_clients:
-            client = ModbusTcpClient(ip, port=502, timeout=3)
-            if self.connect_to_server(ip, client):
-                stop_flag = threading.Event()
-                self.stop_flags[ip] = stop_flag
-                self.clients[ip] = client
-                self.connected_clients[ip] = threading.Thread(
-                    target=self.read_modbus_data,
-                    args=(ip, client, stop_flag, i)
-                )
-                self.connected_clients[ip].daemon = True
-                self.connected_clients[ip].start()
-                self.console.print(f"Started data thread for {ip}")
-
-                # UI 업데이트
-                box_canvas = self.box_data[i][0]
-                gms1000_id = self.box_states[i]["gms1000_text_id"]
-                box_canvas.itemconfig(gms1000_id, state='hidden')  # GMS-1000 숨기기
-
-                self.disconnection_labels[i].grid()      # DC 라벨 보이기
-                self.reconnect_attempt_labels[i].grid()  # Reconnect 라벨 보이기
-
-                # 버튼 이미지 교체 (연결→해제)
-                self.parent.after(
-                    0,
-                    lambda: self.action_buttons[i].config(
-                        image=self.disconnect_image,
-                        relief='flat',
-                        borderwidth=0
-                    )
-                )
-                # Entry 비활성화
-                self.parent.after(0, lambda: self.entries[i].config(state="disabled"))
-
-                # PWR 켜기 + Bar 보이기
-                self.update_circle_state([False, False, True, False], box_index=i)
-                self.show_bar(i, show=True)
-                self.virtual_keyboard.hide()
-                self.blink_pwr(i)
-                self.save_ip_settings()
-
-                # (중요) 연결 성공 직후, Entry 포커스아웃 강제 발생
-                self.entries[i].event_generate("<FocusOut>")
-            else:
-                self.console.print(f"Failed to connect to {ip}")
-                self.parent.after(0, lambda: self.update_circle_state([False, False, False, False], box_index=i))
-
-    def disconnect(self, i, manual=False):
-        """
-        manual=True -> 사용자가 직접 disconnect
-        """
-        ip = self.ip_vars[i].get()
-        if ip in self.connected_clients:
-            threading.Thread(target=self.disconnect_client, args=(ip, i, manual), daemon=True).start()
-
-    def disconnect_client(self, ip, i, manual=False):
-        """
-        실제 해제 로직
-        """
-        self.stop_flags[ip].set()
-        self.connected_clients[ip].join(timeout=5)
-        if self.connected_clients[ip].is_alive():
-            self.console.print(f"Thread for {ip} did not terminate in time.")
-        self.clients[ip].close()
-        self.console.print(f"Disconnected from {ip}")
-        self.cleanup_client(ip)
-        self.parent.after(0, lambda: self.reset_ui_elements(i))
-        self.parent.after(
-            0,
-            lambda: self.action_buttons[i].config(
-                image=self.connect_image,
-                relief='flat',
-                borderwidth=0
-            )
-        )
-        # Entry 활성화
-        self.parent.after(0, lambda: self.entries[i].config(state="normal"))
-        # 해제 시 테두리를 1로
-        self.parent.after(0, lambda: self.box_frames[i].config(highlightthickness=1))
-        self.save_ip_settings()
-
-        if manual:
-            box_canvas = self.box_data[i][0]
-            gms1000_id = self.box_states[i]["gms1000_text_id"]
-            box_canvas.itemconfig(gms1000_id, state='normal')  # GMS-1000 다시 표시
-            self.disconnection_labels[i].grid_remove()
-            self.reconnect_attempt_labels[i].grid_remove()
-
-    def reset_ui_elements(self, box_index):
-        """
-        AL1/AL2/PWR/FUT=OFF, 세그먼트=공백, 바=OFF
-        """
-        self.update_circle_state([False, False, False, False], box_index=box_index)
-        self.update_segment_display("    ", box_index=box_index)
-        self.show_bar(box_index, show=False)
-        self.console.print(f"Reset UI elements for box {box_index}")
-
-    def cleanup_client(self, ip):
-        """
-        내부 dict들 정리
-        """
-        del self.connected_clients[ip]
-        del self.clients[ip]
-        del self.stop_flags[ip]
-
-    def read_modbus_data(self, ip, client, stop_flag, box_index):
-        """
-        주기적으로 holding register 읽어서 큐에 넣고, 끊김 발생하면 reconnect  
-        (각 루프가 총 0.2초가 되도록 보정)
-        """
-        start_address = 40001 - 1
-        num_registers = 11
-        while not stop_flag.is_set():
-            loop_start = time.time()  # 루프 시작 시각 기록
-            try:
-                if client is None or not client.is_socket_open():
-                    raise ConnectionException("Socket is closed")
-
-                response = client.read_holding_registers(start_address, num_registers)
-                if response.isError():
-                    raise ModbusIOException(f"Error reading from {ip}, address 40001~40011")
-
-                raw_regs = response.registers
-                value_40001 = raw_regs[0]
-                value_40005 = raw_regs[4]
-                value_40007 = raw_regs[7]
-                value_40011 = raw_regs[10]
-
-                bit_6_on = bool(value_40001 & (1 << 6))
-                bit_7_on = bool(value_40001 & (1 << 7))
-
-                self.box_states[box_index]["alarm1_on"] = bit_6_on
-                self.box_states[box_index]["alarm2_on"] = bit_7_on
-                self.ui_update_queue.put(('alarm_check', box_index))
-
-                bits = [bool(value_40007 & (1 << n)) for n in range(4)]
-                if not any(bits):
-                    formatted_value = f"{value_40005}"
-                    self.data_queue.put((box_index, formatted_value, False))
-                else:
-                    error_display = ""
-                    for bit_index, bit_flag in enumerate(bits):
-                        if bit_flag:
-                            error_display = BIT_TO_SEGMENT[bit_index]
-                            break
-                    error_display = error_display.ljust(4)
-                    if 'E' in error_display:
-                        self.box_states[box_index]["blinking_error"] = True
-                        self.data_queue.put((box_index, error_display, True))
-                        self.ui_update_queue.put(
-                            ('circle_state', box_index, [False, False, True, self.box_states[box_index]["blink_state"]])
-                        )
-                    else:
-                        self.box_states[box_index]["blinking_error"] = False
-                        self.data_queue.put((box_index, error_display, False))
-                        self.ui_update_queue.put(
-                            ('circle_state', box_index, [False, False, True, False])
-                        )
-
-                self.ui_update_queue.put(('bar', box_index, value_40011))
-            except (ConnectionException, ModbusIOException) as e:
-                self.console.print(f"Connection to {ip} lost: {e}")
-                self.handle_disconnection(box_index)
-                self.reconnect(ip, client, stop_flag, box_index)
-                break
-            except Exception as e:
-                self.console.print(f"Error reading data from {ip}: {e}")
-                self.handle_disconnection(box_index)
-                self.reconnect(ip, client, stop_flag, box_index)
-                break
-
-            # 처리 시간 보정: 남은 시간이 있다면 sleep하여 루프 주기를 0.2초로 맞춤
-            elapsed = time.time() - loop_start
-            remaining = self.communication_interval - elapsed
-            if remaining > 0:
-                time.sleep(remaining)
-
-    def update_bar(self, value, box_index):
-        """
-        Bar 그래프 업데이트
-        """
-        _, _, bar_canvas, _, bar_item = self.box_data[box_index]
-        percentage = value / 100.0
-        bar_length = int(153 * SCALE_FACTOR * percentage)
-        cropped_image = self.gradient_bar.crop((0, 0, bar_length, int(5 * SCALE_FACTOR)))
-        bar_image = ImageTk.PhotoImage(cropped_image)
-        bar_canvas.itemconfig(bar_item, image=bar_image)
-        bar_canvas.bar_image = bar_image
-
-    def show_bar(self, box_index, show):
-        """
-        Bar 숨김/표시
-        """
-        bar_canvas = self.box_data[box_index][2]
-        bar_item = self.box_data[box_index][4]
-        if show:
-            bar_canvas.itemconfig(bar_item, state='normal')
-        else:
-            bar_canvas.itemconfig(bar_item, state='hidden')
-
-    def connect_to_server(self, ip, client):
-        """
-        여러번 시도해서 연결
-        """
-        retries = 5
-        for attempt in range(retries):
-            if client.connect():
-                self.console.print(f"Connected to the Modbus server at {ip}")
-                return True
-            else:
-                self.console.print(f"Connection attempt {attempt + 1} to {ip} failed. Retrying in 2 seconds...")
-                time.sleep(2)
+            messagebox.showerror("오류", "GDSClientLinux 실행 파일 경로가 설정되지 않았습니다.")
+            root.quit()
+            return None
+
+# --------------------- (D) GDSClient 실행 권한 부여 체크 & tftpd-hpa 설치 체크 --------------------- #
+def ensure_gdsclientlinux_executable():
+    if not os.path.isfile(GDSCLIENT_PATH):
+        async_log_print(f"[오류] GDSClientLinux 파일을 찾을 수 없습니다: {GDSCLIENT_PATH}")
         return False
 
-    def start_data_processing_thread(self):
-        threading.Thread(target=self.process_data, daemon=True).start()
+    file_stat = os.stat(GDSCLIENT_PATH)
+    if not (file_stat.st_mode & stat.S_IXUSR):
+        async_log_print("[정보] GDSClientLinux에 실행 권한이 없어 설정합니다...")
+        ret = run_command_realtime(["sudo", "chmod", "+x", GDSCLIENT_PATH])
+        if ret != 0:
+            async_log_print("[오류] GDSClientLinux 실행 권한 설정 실패")
+            return False
 
-    def process_data(self):
-        """
-        Modbus 데이터를 받아 UI 갱신 큐에 넣음
-        """
-        while True:
-            try:
-                box_index, value, blink = self.data_queue.get(timeout=1)
-                self.ui_update_queue.put(('segment_display', box_index, value, blink))
-            except queue.Empty:
-                continue
+    return True
 
-    def schedule_ui_update(self):
-        self.parent.after(100, self.update_ui_from_queue)
-
-    def update_ui_from_queue(self):
-        """
-        UI 업데이트(알람, 바, 세그먼트 등)
-        """
-        try:
-            while not self.ui_update_queue.empty():
-                item = self.ui_update_queue.get_nowait()
-                if item[0] == 'circle_state':
-                    _, box_index, states = item
-                    self.update_circle_state(states, box_index=box_index)
-                elif item[0] == 'bar':
-                    _, box_index, value = item
-                    self.update_bar(value, box_index)
-                elif item[0] == 'segment_display':
-                    _, box_index, value, blink = item
-                    self.update_segment_display(value, box_index=box_index, blink=blink)
-                elif item[0] == 'alarm_check':
-                    box_index = item[1]
-                    self.check_alarms(box_index)
-        except queue.Empty:
-            pass
-        finally:
-            self.schedule_ui_update()
-
-    def check_click(self, event):
+def check_and_install_tftpd():
+    async_log_print("[정보] tftpd-hpa 설치 여부 확인 중...")
+    try:
+        check_install = subprocess.check_output(
+            ["dpkg", "-l", "tftpd-hpa"],
+            stderr=subprocess.STDOUT,
+            universal_newlines=True
+        )
+        if "tftpd-hpa" in check_install:
+            async_log_print("[정보] tftpd-hpa가 이미 설치되어 있습니다.")
+            return True
+    except subprocess.CalledProcessError:
         pass
 
-    def handle_disconnection(self, box_index):
-        """
-        연결 끊겼을 때 처리
-        """
-        self.disconnection_counts[box_index] += 1
-        self.disconnection_labels[box_index].config(
-            text=f"DC: {self.disconnection_counts[box_index]}"
-        )
+    async_log_print("[정보] tftpd-hpa가 설치되어 있지 않아 설치를 진행합니다...")
+    ret = run_command_realtime(["sudo", "apt-get", "update"])
+    if ret != 0:
+        async_log_print("[오류] apt-get update 실패")
+        return False
 
-        self.ui_update_queue.put(('circle_state', box_index, [False, False, False, False]))
-        self.ui_update_queue.put(('segment_display', box_index, "    ", False))
-        self.ui_update_queue.put(('bar', box_index, 0))
+    ret = run_command_realtime(["sudo", "apt-get", "-y", "install", "tftpd-hpa"])
+    if ret == 0:
+        return True
+    else:
+        async_log_print("[오류] tftpd-hpa 설치 실패")
+        return False
 
-        self.parent.after(
-            0, 
-            lambda: self.action_buttons[box_index].config(
-                image=self.connect_image,
-                relief='flat',
-                borderwidth=0
+def start_tftp_server():
+    async_log_print("[정보] TFTP 서버를 시작합니다...")
+    run_command_realtime(["sudo", "systemctl", "enable", "tftpd-hpa"])
+    run_command_realtime(["sudo", "systemctl", "start", "tftpd-hpa"])
+
+# --------------------- (E) 업그레이드 절차에 필요한 파일 복사 함수 --------------------- #
+def copy_to_tftp(file_path):
+    if not os.path.isfile(file_path):
+        async_log_print(f"[오류] 파일이 존재하지 않습니다: {file_path}")
+        return False
+
+    if not os.path.exists(TFTP_ROOT_DIR):
+        async_log_print(f"[오류] TFTP 루트 디렉토리가 없습니다: {TFTP_ROOT_DIR}")
+        return False
+
+    file_name = os.path.basename(file_path)
+    dest_path = os.path.join(TFTP_ROOT_DIR, file_name)
+
+    try:
+        shutil.copy(file_path, dest_path)
+        async_log_print(f"[파일 복사] {file_path} -> {dest_path}")
+        run_command_realtime(["sudo", "chmod", "644", dest_path])
+        return True
+    except Exception as e:
+        async_log_print(f"[오류] 파일 복사 중 문제 발생: {e}")
+        return False
+
+# --------------------- (F) 업그레이드 단일 실행 프로세스 (모드 전환 후 업그레이드) --------------------- #
+def upgrade_task(detector_ip, tftp_ip, upgrade_file_paths):
+    """
+    업그레이드 절차:
+    1) 파일 리스트 중 무작위 선택
+    2) 선택된 파일을 TFTP 루트 디렉토리에 복사
+    3) TFTP 서버 실행
+    4) 디텍터를 업그레이드 모드로 변경 (cmd:4 1)
+    5) 잠시 대기 (2초)
+    6) 업그레이드 명령 (cmd:5, tftp_ip, file_name)
+    """
+    # 파일 리스트 파싱
+    files = [f.strip() for f in upgrade_file_paths.split(",") if f.strip()]
+    if not files:
+        async_log_print("[오류] 업그레이드할 파일이 선택되지 않았습니다.")
+        return
+    
+    # 무작위 파일 선택
+    selected_file = random.choice(files)
+    
+    # 1. 파일 복사
+    if not copy_to_tftp(selected_file):
+        return
+    
+    # 2. TFTP 서버 기동
+    start_tftp_server()
+    
+    # 3. 모드 변경
+    ret1 = run_command_realtime([GDSCLIENT_PATH, detector_ip, "4", "1"])
+    time.sleep(2)  # 디텍터가 모드 전환될 시간
+    
+    # 4. 업그레이드
+    file_name = os.path.basename(selected_file)
+    ret2 = run_command_realtime([GDSCLIENT_PATH, detector_ip, "5", tftp_ip, file_name])
+    
+    if ret2 == 0:
+        async_log_print(f"[알림] {detector_ip} 업그레이드 명령을 성공적으로 마쳤습니다. 사용된 파일: {file_name}")
+    else:
+        async_log_print(f"[알림] {detector_ip} 업그레이드 명령 중 오류가 발생했습니다.")
+
+# --------------------- (G) 업그레이드(단발) 호출 함수 (다중 장비 지원) --------------------- #
+def get_detector_ips():
+    """
+    detector_ip_entry의 값을 콤마로 분리하여 IP 리스트로 반환합니다.
+    """
+    ip_text = detector_ip_entry.get().strip()
+    ips = [ip.strip() for ip in ip_text.split(",") if ip.strip()]
+    return ips
+
+def upgrade_once_multiple():
+    tftp_ip = tftp_ip_entry.get().strip()
+    upgrade_file_paths = file_entry.get().strip()
+    detector_ips = get_detector_ips()
+
+    if not detector_ips or not tftp_ip or not upgrade_file_paths:
+        messagebox.showwarning("경고", "모든 입력 항목(장비 IP(들), TFTP IP, 업그레이드 파일)을 입력하세요.")
+        return
+
+    # 각 detector IP마다 별도의 스레드에서 업그레이드 작업 수행
+    for ip in detector_ips:
+        threading.Thread(
+            target=upgrade_task,
+            args=(ip, tftp_ip, upgrade_file_paths),
+            daemon=True
+        ).start()
+
+# ============================================================
+# =============== 랜덤 반복 업그레이드 관련 로직 (다중 장비) ===============
+# ============================================================
+def auto_upgrade_loop_multiple():
+    tftp_ip = tftp_ip_entry.get().strip()
+    upgrade_file_paths = file_entry.get().strip()
+    detector_ips = get_detector_ips()
+
+    # 파일 리스트 파싱
+    files = [f.strip() for f in upgrade_file_paths.split(",") if f.strip()]
+    if not files:
+        async_log_print("[오류] 업그레이드할 파일이 선택되지 않았습니다.")
+        return
+
+    while not stop_event.is_set():
+        # 모든 detector IP에 대해 업그레이드 작업을 동시에 수행
+        threads = []
+        for ip in detector_ips:
+            th = threading.Thread(
+                target=upgrade_task,
+                args=(ip, tftp_ip, upgrade_file_paths),
+                daemon=True
             )
-        )
-        self.parent.after(0, lambda: self.entries[box_index].config(state="normal"))
-        self.parent.after(0, lambda: self.box_frames[box_index].config(highlightthickness=1))
-        self.parent.after(0, lambda: self.reset_ui_elements(box_index))
+            th.start()
+            threads.append(th)
 
-        self.box_states[box_index]["pwr_blink_state"] = False
-        self.box_states[box_index]["pwr_blinking"] = False
+        # 각 작업이 완료될 때까지 기다림
+        for th in threads:
+            th.join()
 
-        box_canvas = self.box_data[box_index][0]
-        circle_items = self.box_data[box_index][1]
-        box_canvas.itemconfig(circle_items[2], fill="#e0fbba", outline="#e0fbba")
-        self.console.print(f"PWR lamp set to default green for box {box_index} due to disconnection.")
+        if stop_event.is_set():
+            break
 
-    def reconnect(self, ip, client, stop_flag, box_index):
-        """
-        자동 재연결 로직
-        """
-        retries = 0
-        max_retries = 5
-        while not stop_flag.is_set() and retries < max_retries:
-            time.sleep(2)
-            self.console.print(f"Attempting to reconnect to {ip} (Attempt {retries + 1}/{max_retries})")
-
-            self.parent.after(0, lambda idx=box_index, r=retries:
-                self.reconnect_attempt_labels[idx].config(text=f"Reconnect: {r + 1}/{max_retries}")
-            )
-
-            if client.connect():
-                self.console.print(f"Reconnected to the Modbus server at {ip}")
-                stop_flag.clear()
-                threading.Thread(
-                    target=self.read_modbus_data,
-                    args=(ip, client, stop_flag, box_index),
-                    daemon=True
-                ).start()
-                self.parent.after(
-                    0,
-                    lambda: self.action_buttons[box_index].config(
-                        image=self.disconnect_image,
-                        relief='flat',
-                        borderwidth=0
-                    )
-                )
-                self.parent.after(0, lambda: self.entries[box_index].config(state="disabled"))
-                # 재연결 시 테두리 얇게
-                self.parent.after(0, lambda: self.box_frames[box_index].config(highlightthickness=0))
-
-                self.ui_update_queue.put(('circle_state', box_index, [False, False, True, False]))
-                self.blink_pwr(box_index)
-                self.show_bar(box_index, show=True)
-
-                # 성공 시 OK 표시
-                self.parent.after(0, lambda idx=box_index:
-                    self.reconnect_attempt_labels[idx].config(text="Reconnect: OK")
-                )
+        # 42초 ~ 300초 사이 랜덤 대기
+        wait_sec = random.randint(42, 300)
+        async_log_print(f"[자동모드] 다음 업그레이드까지 대기: {wait_sec}초")
+        for _ in range(wait_sec):
+            if stop_event.is_set():
                 break
+            time.sleep(1)
+
+def start_auto_upgrade_multiple():
+    global auto_thread
+
+    # GDSClientLinux 파일 체크
+    if not ensure_gdsclientlinux_executable():
+        async_log_print("[오류] GDSClientLinux 실행 권한 설정 실패 또는 파일이 없습니다.")
+        return
+
+    # tftpd-hpa 설치 체크
+    if not check_and_install_tftpd():
+        async_log_print("[오류] tftpd-hpa 설치가 안 되어 업그레이드를 진행할 수 없습니다.")
+        return
+
+    tftp_ip = tftp_ip_entry.get().strip()
+    upgrade_file_paths = file_entry.get().strip()
+    detector_ips = get_detector_ips()
+    if not detector_ips or not tftp_ip or not upgrade_file_paths:
+        messagebox.showwarning("경고", "모든 입력 항목(장비 IP(들), TFTP IP, 업그레이드 파일)을 입력하세요.")
+        return
+
+    if not auto_thread or not auto_thread.is_alive():
+        stop_event.clear()
+        async_log_print("[자동모드] 다중 장비에 대해 무작위 업그레이드 시작")
+        auto_thread = threading.Thread(target=auto_upgrade_loop_multiple, daemon=True)
+        auto_thread.start()
+    else:
+        async_log_print("[자동모드] 이미 동작 중입니다.")
+
+def stop_auto_upgrade():
+    global auto_thread
+
+    if auto_thread and auto_thread.is_alive():
+        async_log_print("[자동모드] 중지 명령 전송")
+        stop_event.set()
+    else:
+        async_log_print("[자동모드] 현재 동작 중이 아닙니다.")
+
+# ----- (H) 파일 선택 ----- #
+def select_files():
+    filepaths = filedialog.askopenfilenames(title="업그레이드 파일 선택")
+    if filepaths:
+        file_entry.delete(0, tk.END)
+        # 파일 경로를 콤마로 구분하여 저장
+        file_entry.insert(0, ",".join(filepaths))
+
+# --------------------- (I) 컴퓨터의 로컬 IP 주소를 가져오는 함수 --------------------- #
+def get_local_ip():
+    """
+    로컬 IP 주소를 반환합니다.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = '127.0.0.1'
+    finally:
+        s.close()
+    return IP
+
+# --------------------- 추가: Modbus TCP 테스트 기능 (통합 IP 입력란 사용) --------------------- #
+def modbus_test():
+    """
+    Detector IP(들) 입력란에 입력된 IP들 중 첫 번째 IP로 Modbus TCP 연결 테스트를 수행합니다.
+    여러 IP가 입력된 경우, 첫 번째 IP로 테스트합니다.
+    """
+    ip_text = detector_ip_entry.get().strip()
+    if not ip_text:
+        messagebox.showwarning("경고", "장비 IP(들)를 입력하세요.")
+        return
+    modbus_ip = ip_text.split(",")[0].strip()
+    try:
+        client = ModbusTcpClient(modbus_ip, port=502, timeout=3)
+        if client.connect():
+            response = client.read_holding_registers(0, count=1)
+            if not response.isError():
+                data = response.registers[0]
+                async_log_print(f"[Modbus 테스트] {modbus_ip} 연결 성공. 데이터: {data}")
+                messagebox.showinfo("Modbus 테스트", f"{modbus_ip} 연결 성공.\n데이터: {data}")
             else:
-                retries += 1
-                self.console.print(f"Reconnect attempt to {ip} failed.")
-
-        if retries >= max_retries:
-            self.console.print(f"Failed to reconnect to {ip} after {max_retries} attempts.")
-            self.auto_reconnect_failed[box_index] = True
-            self.parent.after(0, lambda idx=box_index:
-                self.reconnect_attempt_labels[idx].config(text="Reconnect: Failed")
-            )
-            self.disconnect_client(ip, box_index, manual=False)
-
-    def save_ip_settings(self):
-        """
-        IP 리스트를 json으로 저장
-        """
-        ip_settings = [ip_var.get() for ip_var in self.ip_vars]
-        with open(self.SETTINGS_FILE, 'w') as file:
-            json.dump(ip_settings, file)
-
-    def blink_pwr(self, box_index):
-        """
-        PWR 램프 깜박임
-        """
-        if self.box_states[box_index].get("pwr_blinking", False):
-            return
-
-        self.box_states[box_index]["pwr_blinking"] = True
-
-        def toggle_color():
-            if not self.box_states[box_index]["pwr_blinking"]:
-                return
-
-            if self.ip_vars[box_index].get() not in self.connected_clients:
-                box_canvas = self.box_data[box_index][0]
-                circle_items = self.box_data[box_index][1]
-                box_canvas.itemconfig(circle_items[2], fill="#e0fbba", outline="#e0fbba")
-                self.box_states[box_index]["pwr_blink_state"] = False
-                self.box_states[box_index]["pwr_blinking"] = False
-                return
-
-            box_canvas = self.box_data[box_index][0]
-            circle_items = self.box_data[box_index][1]
-            if self.box_states[box_index]["pwr_blink_state"]:
-                box_canvas.itemconfig(circle_items[2], fill="red", outline="red")
-            else:
-                box_canvas.itemconfig(circle_items[2], fill="green", outline="green")
-
-            self.box_states[box_index]["pwr_blink_state"] = not self.box_states[box_index]["pwr_blink_state"]
-            if self.ip_vars[box_index].get() in self.connected_clients:
-                self.parent.after(self.blink_interval, toggle_color)
-
-        toggle_color()
-
-    def check_alarms(self, box_index):
-        """
-        AL1/AL2 상태 보고 깜박임/테두리 색상 처리
-        """
-        alarm1 = self.box_states[box_index]["alarm1_on"]
-        alarm2 = self.box_states[box_index]["alarm2_on"]
-
-        if alarm2:
-            self.box_states[box_index]["alarm1_blinking"] = False
-            self.box_states[box_index]["alarm2_blinking"] = True
-            self.set_alarm_lamp(box_index, alarm1_on=True, blink1=False, alarm2_on=True, blink2=True)
-            self.box_states[box_index]["alarm_border_blink"] = True
-            self.blink_alarms(box_index)
-        elif alarm1:
-            self.box_states[box_index]["alarm1_blinking"] = True
-            self.box_states[box_index]["alarm2_blinking"] = False
-            self.box_states[box_index]["alarm_border_blink"] = True
-            self.set_alarm_lamp(box_index, alarm1_on=True, blink1=True, alarm2_on=False, blink2=False)
-            self.blink_alarms(box_index)
+                async_log_print(f"[Modbus 테스트] {modbus_ip} 읽기 실패: {response}")
+                messagebox.showerror("Modbus 테스트", f"{modbus_ip} 읽기 실패: {response}")
+            client.close()
         else:
-            self.box_states[box_index]["alarm1_blinking"] = False
-            self.box_states[box_index]["alarm2_blinking"] = False
-            self.box_states[box_index]["alarm_border_blink"] = False
-            self.set_alarm_lamp(box_index, alarm1_on=False, blink1=False, alarm2_on=False, blink2=False)
+            async_log_print(f"[Modbus 테스트] {modbus_ip}에 연결할 수 없습니다.")
+            messagebox.showerror("Modbus 테스트", f"{modbus_ip}에 연결할 수 없습니다.")
+    except Exception as e:
+        async_log_print(f"[Modbus 테스트] 예외 발생: {e}")
+        messagebox.showerror("Modbus 테스트", f"예외 발생: {e}")
 
-            box_canvas = self.box_data[box_index][0]
-            box_canvas.config(highlightbackground="#000000")
-            self.box_states[box_index]["border_blink_state"] = False
+# ============================================================== #
+# ======================= Tkinter UI 구성 ======================= #
+# ============================================================== #
+root = tk.Tk()
+root.title("자동 업그레이드 테스트 UI (다중 장비)")
 
-    def set_alarm_lamp(self, box_index, alarm1_on, blink1, alarm2_on, blink2):
-        box_canvas, circle_items, *_ = self.box_data[box_index]
-        # alarm1
-        if alarm1_on:
-            if blink1:
-                box_canvas.itemconfig(circle_items[0], fill="#fdc8c8", outline="#fdc8c8")
-            else:
-                box_canvas.itemconfig(circle_items[0], fill="red", outline="red")
-        else:
-            box_canvas.itemconfig(circle_items[0], fill="#fdc8c8", outline="#fdc8c8")
-        # alarm2
-        if alarm2_on:
-            if blink2:
-                box_canvas.itemconfig(circle_items[1], fill="#fdc8c8", outline="#fdc8c8")
-            else:
-                box_canvas.itemconfig(circle_items[1], fill="red", outline="red")
-        else:
-            box_canvas.itemconfig(circle_items[1], fill="#fdc8c8", outline="#fdc8c8")
+info_label = tk.Label(
+    root,
+    text=(
+        "GDSClientLinux를 이용하여 랜덤 간격(42~300초)으로\n"
+        "자동 업그레이드를 반복 실행하는 테스트 툴입니다.\n"
+        "여러 장비(Detector IP)를 동시에 처리할 수 있습니다.\n"
+        "업그레이드 파일을 여러 개 선택하면 업그레이드 시 무작위로 선택됩니다.\n\n"
+        "※ Modbus 테스트는 '장비 IP(들)' 입력란의 첫 번째 IP를 사용합니다."
+    ),
+    fg="blue"
+)
+info_label.pack(padx=10, pady=5)
 
-    def blink_alarms(self, box_index):
-        """
-        AL1/AL2 or 테두리 깜박임
-        """
-        if not (
-            self.box_states[box_index]["alarm1_blinking"]
-            or self.box_states[box_index]["alarm2_blinking"]
-            or self.box_states[box_index]["alarm_border_blink"]
-        ):
-            return
+# IP 입력 프레임
+frame_ip = tk.Frame(root)
+frame_ip.pack(padx=10, pady=5, fill="x")
 
-        box_canvas, circle_items, *_ = self.box_data[box_index]
-        state = self.box_states[box_index]["border_blink_state"]
-        self.box_states[box_index]["border_blink_state"] = not state
+tk.Label(frame_ip, text="장비 IP(들):").grid(row=0, column=0, sticky="e")
+detector_ip_entry = tk.Entry(frame_ip, width=30)
+detector_ip_entry.grid(row=0, column=1, padx=5)
 
-        if self.box_states[box_index]["alarm_border_blink"]:
-            if state:
-                box_canvas.config(highlightbackground="#000000")
-            else:
-                box_canvas.config(highlightbackground="#ff0000")
+tk.Label(frame_ip, text="TFTP IP:").grid(row=0, column=2, sticky="e")
+tftp_ip_entry = tk.Entry(frame_ip, width=15)
+tftp_ip_entry.grid(row=0, column=3, padx=5)
 
-        if self.box_states[box_index]["alarm1_blinking"]:
-            fill_now = box_canvas.itemcget(circle_items[0], "fill")
-            if fill_now == "red":
-                box_canvas.itemconfig(circle_items[0], fill="#fdc8c8", outline="#fdc8c8")
-            else:
-                box_canvas.itemconfig(circle_items[0], fill="red", outline="red")
+# Modbus 테스트 버튼 (추가)
+modbus_test_btn = tk.Button(frame_ip, text="Modbus 테스트", command=modbus_test)
+modbus_test_btn.grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
-        if self.box_states[box_index]["alarm2_blinking"]:
-            fill_now = box_canvas.itemcget(circle_items[1], "fill")
-            if fill_now == "red":
-                box_canvas.itemconfig(circle_items[1], fill="#fdc8c8", outline="#fdc8c8")
-            else:
-                box_canvas.itemconfig(circle_items[1], fill="red", outline="red")
+# 파일 선택 프레임
+frame_file = tk.Frame(root)
+frame_file.pack(padx=10, pady=5, fill="x")
 
-        self.parent.after(self.alarm_blink_interval, lambda: self.blink_alarms(box_index))
+tk.Label(frame_file, text="업그레이드 파일:").grid(row=0, column=0, sticky="e")
+file_entry = tk.Entry(frame_file, width=60)
+file_entry.grid(row=0, column=1, padx=5)
+file_btn = tk.Button(frame_file, text="파일 선택", command=select_files)
+file_btn.grid(row=0, column=2, padx=5)
 
+# 명령 버튼들 (자동 시작/중지, 단발 업그레이드)
+frame_buttons = tk.Frame(root)
+frame_buttons.pack(padx=10, pady=5)
 
-def main():
-    root = Tk()
-    root.title("Modbus UI")
-    root.geometry("1200x600")
-    root.configure(bg="#1e1e1e")
+btn_start_auto = tk.Button(frame_buttons, text="자동 업그레이드 시작 (다중)", width=25, command=start_auto_upgrade_multiple)
+btn_start_auto.grid(row=0, column=0, padx=5, pady=5)
 
-    num_boxes = 4
-    gas_types = {
-        "modbus_box_0": "ORG",
-        "modbus_box_1": "ARF-T",
-        "modbus_box_2": "HMDS",
-        "modbus_box_3": "HC-100"
-    }
+btn_stop_auto = tk.Button(frame_buttons, text="자동 업그레이드 중지", width=25, command=stop_auto_upgrade)
+btn_stop_auto.grid(row=0, column=1, padx=5, pady=5)
 
-    def alarm_callback(active, box_id):
-        if active:
-            print(f"[Callback] Alarm active in {box_id}")
-        else:
-            print(f"[Callback] Alarm cleared in {box_id}")
+btn_upgrade_once = tk.Button(frame_buttons, text="단발 업그레이드 실행 (다중)", width=25, command=upgrade_once_multiple)
+btn_upgrade_once.grid(row=0, column=2, padx=5, pady=5)
 
-    modbus_ui = ModbusUI(root, num_boxes, gas_types, alarm_callback)
+# 로그 창
+log_text = scrolledtext.ScrolledText(root, width=80, height=15)
+log_text.pack(padx=10, pady=10)
 
-    row, col = 0, 0
-    max_col = 2
-    for i, frame in enumerate(modbus_ui.box_frames):
-        frame.grid(row=row, column=col, padx=10, pady=10)
-        col += 1
-        if col >= max_col:
-            col = 0
-            row += 1
+# 마우스 우클릭 > 복사
+def copy_selection():
+    log_text.event_generate("<<Copy>>")
 
-    root.mainloop()
+context_menu = tk.Menu(log_text, tearoff=0)
+context_menu.add_command(label="복사", command=copy_selection)
 
-if __name__ == "__main__":
-    main()
+def show_context_menu(event):
+    context_menu.tk_popup(event.x_root, event.y_root)
+
+log_text.bind("<Button-3>", show_context_menu)
+
+# --------------------- (K) 시작 시 자동 설정 --------------------- #
+def on_start():
+    global GDSCLIENT_PATH
+
+    # 1. GDSClientLinux 실행 경로 가져오기
+    GDSCLIENT_PATH = get_gdsclient_path()
+    if not GDSCLIENT_PATH:
+        return
+
+    # 2. GDSClientLinux 실행 권한 확인
+    if not ensure_gdsclientlinux_executable():
+        async_log_print("[오류] GDSClientLinux 실행 권한 설정 실패 혹은 파일이 없습니다.")
+
+    # 3. tftpd-hpa 설치 확인 & 자동 설치
+    if check_and_install_tftpd():
+        start_tftp_server()
+
+    # 4. TFTP IP & 장비 IP 자동 설정
+    local_ip = get_local_ip()
+    async_log_print(f"[정보] 로컬 IP 주소 감지: {local_ip}")
+
+    tftp_ip_entry.delete(0, tk.END)
+    tftp_ip_entry.insert(0, local_ip)
+
+    try:
+        base_ip = '.'.join(local_ip.split('.')[:3]) + '.'
+    except Exception:
+        base_ip = "192.168.0."
+        async_log_print("[경고] 로컬 IP 분석 실패, 기본값 '192.168.0.' 사용")
+
+    detector_ip_entry.delete(0, tk.END)
+    detector_ip_entry.insert(0, base_ip)
+
+root.after(100, on_start)
+
+root.mainloop()
