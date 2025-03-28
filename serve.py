@@ -306,7 +306,7 @@ def modbus_test():
     try:
         client = ModbusTcpClient(modbus_ip, port=502, timeout=3)
         if client.connect():
-            response = client.read_holding_registers(0, count=1)
+            response = client.read_holding_registers(0, 1)
             if not response.isError():
                 data = response.registers[0]
                 async_log_print(f"[Modbus 테스트] {modbus_ip} 연결 성공. 데이터: {data}")
@@ -346,12 +346,25 @@ class ModbusPoller:
     def poll_loop(self):
         while self.running:
             try:
-                response = self.client.read_holding_registers(0, 1)
+                # 0번부터 10번까지 총 11개의 레지스터를 읽어옵니다.
+                response = self.client.read_holding_registers(0, 11)
                 if response.isError():
                     self.update_callback(self.ip, None, "에러 발생")
                 else:
-                    data = response.registers[0]
-                    self.update_callback(self.ip, data, "정상")
+                    regs = response.registers
+                    # 각 레지스터 값을 추출합니다.
+                    value_40001 = regs[0]
+                    value_40005 = regs[4]
+                    value_40007 = regs[7]
+                    value_40011 = regs[10]
+                    # 표시할 문자열 포맷 예시
+                    display_data = (
+                        f"40001: {value_40001}, "
+                        f"40005: {value_40005}, "
+                        f"40007: {value_40007}, "
+                        f"40011: {value_40011}"
+                    )
+                    self.update_callback(self.ip, display_data, "정상")
             except Exception as e:
                 self.update_callback(self.ip, None, f"예외: {e}")
             time.sleep(self.poll_interval)
@@ -364,7 +377,10 @@ class ModbusPoller:
 
 def update_modbus_label(ip, data, status):
     def update():
-        text = f"IP: {ip} | 데이터: {data} | 상태: {status}"
+        if data is None:
+            text = f"IP: {ip} | 상태: {status}"
+        else:
+            text = f"IP: {ip} | {data} | 상태: {status}"
         if ip in modbus_labels:
             modbus_labels[ip].config(text=text)
         else:
