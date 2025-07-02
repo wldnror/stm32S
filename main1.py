@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 import socket
 import struct
+import argparse
 from pymodbus import __version__ as _pymodbus_version
 
-# pymodbus v2.x/v3.x 호환을 위한 import
+# pymodbus v2.x/v3.x 호환 import
 try:
-    # pymodbus 2.x
     from pymodbus.client.sync import ModbusTcpClient
 except (ImportError, ModuleNotFoundError):
     try:
-        # pymodbus 3.x
         from pymodbus.client import ModbusTcpClient
     except ImportError:
-        # pymodbus 3.x alternate path
         from pymodbus.client.tcp import ModbusTcpClient
 
 class GDSClient:
-    BASE = 40001  # Modbus 주소 오프셋
+    BASE = 40001
 
     def __init__(self, host, port=502, unit_id=1):
         self.client = ModbusTcpClient(host, port=port)
@@ -25,7 +23,6 @@ class GDSClient:
             raise ConnectionError(f"Cannot connect to {host}:{port}")
 
     def _addr(self, reg):
-        """40001 기준으로 실제 레지스터 오프셋 계산"""
         return reg - self.BASE
 
     def read_register(self, reg):
@@ -56,67 +53,90 @@ class GDSClient:
         if wr.isError():
             raise IOError(f"Write error at registers starting {reg}")
 
-    # === 읽기 기능 ===
+    # === 읽기 메서드 ===
     def get_version(self):
-        """레지스터 40022: 펌웨어 버전"""
         return self.read_register(40022)
 
     def get_upgrade_status(self):
-        """레지스터 40023: 업그레이드/롤백 상태"""
         return self.read_register(40023)
 
     def get_download_progress(self):
-        """레지스터 40024: 진행률(하위 8비트) + 남은 시간(상위 8비트)"""
         val = self.read_register(40024)
-        prog = val & 0xFF
-        rem  = (val >> 8) & 0xFF
-        return prog, rem
+        return val & 0xFF, (val >> 8) & 0xFF
 
-    # === TFTP 서버 IP 설정 (40088–40089) ===
-    def set_tftp_server(self, ip_addr: str):
-        packed = socket.inet_aton(ip_addr)
+    # === 쓰기 메서드 ===
+    def set_tftp_server(self, ip):
+        packed = socket.inet_aton(ip)
         hi, lo = struct.unpack('>HH', packed)
         self.write_registers(40088, [hi, lo])
 
-    # === 업그레이드 / 취소 / 롤백 (40091) ===
-    def start_upgrade(self):
-        self.write_register(40091, 1)
-    def cancel_upgrade(self):
-        self.write_register(40091, 0)
-    def rollback(self):
-        self.write_register(40091, 2)
-
-    # === 제로 캘리브레이션 (40092) ===
-    def zero_calibration(self):
-        self.write_register(40092, 1)
-
-    # === 재부팅 (40093) ===
-    def reboot(self):
-        self.write_register(40093, 1)
+    def start_upgrade(self):   self.write_register(40091, 1)
+    def cancel_upgrade(self):  self.write_register(40091, 0)
+    def rollback(self):        self.write_register(40091, 2)
+    def zero_calibration(self):self.write_register(40092, 1)
+    def reboot(self):          self.write_register(40093, 1)
 
     def close(self):
         self.client.close()
 
 
-if __name__ == "__main__":
-    HOST    = "192.168.0.15"  # GDS 장치 IP
-    UNIT_ID = 1               # Modbus 슬레이브 ID
+def main():
+    p = argparse.ArgumentParser(description="GDS Modbus TCP 간편 CLI")
+    p.add_argument("host", help="GDS 장치 IP")
+    p.add_argument("--unit",   type=int, default=1, help="Modbus 슬레이브 ID (기본: 1)")
+    sub = p.add_subparsers(dest="cmd", required=True)
 
-    print("pymodbus version:", _pymodbus_version)
-    gds = GDSClient(HOST, unit_id=UNIT_ID)
+    sub.add_parser("version", help="펌웨어 버전 읽기")
+    sub.add_parser("status",  help="업그레이드 상태 읽기")
+    sub.add_parser("progress",help="다운로드 진행률 읽기")
+
+    tftp = sub.add_parser("set-tftp", help="TFTP 서버 IP 설정")
+    tftp.add_argument("ip", help="설정할 IP 주소")
+
+    sub.add_parser("start",  help="업그레이드 시작")
+    sub.add_parser("cancel", help="업그레이드 취소")
+    sub.add_parser("rollback",help="롤백 실행")
+    sub.add_parser("zero",   help="제로 캘리브레이션")
+    sub.add_parser("reboot", help="장치 재부팅")
+
+    args = p.parse_args()
+
+    print(f"pymodbus version: {_pymodbus_version}")
+    g = GDSClient(args.host, unit_id=args.unit)
+
     try:
-        # 읽기 예시
-        print("Firmware Version (40022):", gds.get_version())
-        status = gds.get_upgrade_status()
-        print("Upgrade Status  (40023): 0b{:016b}".format(status))
-        prog, rem = gds.get_download_progress()
-        print(f"Download Progress (40024): {prog}% remaining {rem}s")
+        if args.cmd == "version":
+            print("Firmware Version:", g.get_version())
 
-        # 쓰기 예시
-        # gds.set_tftp_server("109.3.55.2")
-        # gds.start_upgrade()
-        # gds.zero_calibration()
-        # gds.reboot()
+        elif args.cmd == "status":
+            st = g.get_upgrade_status()
+            print("Upgrade Status: 0b{:016b}".format(st))
+
+        elif args.cmd == "progress":
+            prog, rem = g.get_download_progress()
+            print(f"Download: {prog}%  Remaining: {rem}s")
+
+        elif args.cmd == "set-tftp":
+            g.set_tftp_server(args.ip)
+            print("TFTP 서버 IP 설정 완료:", args.ip)
+
+        elif args.cmd == "start":
+            g.start_upgrade();  print("업그레이드 명령 전송됨")
+
+        elif args.cmd == "cancel":
+            g.cancel_upgrade(); print("업그레이드 취소 명령 전송됨")
+
+        elif args.cmd == "rollback":
+            g.rollback();       print("롤백 명령 전송됨")
+
+        elif args.cmd == "zero":
+            g.zero_calibration(); print("제로 캘리브레이션 명령 전송됨")
+
+        elif args.cmd == "reboot":
+            g.reboot();         print("재부팅 명령 전송됨")
 
     finally:
-        gds.close()
+        g.close()
+
+if __name__ == "__main__":
+    main()
