@@ -157,16 +157,16 @@ def start_tftp_server():
     run_command_realtime(["sudo", "systemctl", "enable", "tftpd-hpa"])
     run_command_realtime(["sudo", "systemctl", "start", "tftpd-hpa"])
 
-# --------------------- (E) 파일 복사 --------------------- #
-def copy_to_tftp(file_path):
+# --------------------- (E) 파일 복사 (고정 이름) --------------------- #
+def copy_to_tftp(file_path, dest_name="ASGD3000E_H.bin"):
     if not os.path.isfile(file_path):
         async_log_print(f"[오류] 파일이 존재하지 않습니다: {file_path}")
         return False
     if not os.path.exists(TFTP_ROOT_DIR):
         async_log_print(f"[오류] TFTP 루트 디렉토리가 없습니다: {TFTP_ROOT_DIR}")
         return False
-    file_name = os.path.basename(file_path)
-    dest_path = os.path.join(TFTP_ROOT_DIR, file_name)
+
+    dest_path = os.path.join(TFTP_ROOT_DIR, dest_name)
     try:
         shutil.copy(file_path, dest_path)
         async_log_print(f"[파일 복사] {file_path} -> {dest_path}")
@@ -176,22 +176,23 @@ def copy_to_tftp(file_path):
         async_log_print(f"[오류] 파일 복사 중 문제 발생: {e}")
         return False
 
-# --------------------- (F) 업그레이드 작업 --------------------- #
+# --------------------- (F) 업그레이드 작업 (고정 이름) --------------------- #
 def upgrade_task(detector_ip, tftp_ip, upgrade_file_paths):
     files = [f.strip() for f in upgrade_file_paths.split(",") if f.strip()]
     if not files:
         async_log_print("[오류] 업그레이드할 파일이 선택되지 않았습니다.")
         return
     selected_file = random.choice(files)
-    if not copy_to_tftp(selected_file):
+    fixed_name = "ASGD3000E_H.bin"
+
+    if not copy_to_tftp(selected_file, dest_name=fixed_name):
         return
     start_tftp_server()
     ret1 = run_command_realtime([GDSCLIENT_PATH, detector_ip, "4", "1"])
     time.sleep(2)
-    file_name = os.path.basename(selected_file)
-    ret2 = run_command_realtime([GDSCLIENT_PATH, detector_ip, "5", tftp_ip, file_name])
+    ret2 = run_command_realtime([GDSCLIENT_PATH, detector_ip, "5", tftp_ip, fixed_name])
     if ret2 == 0:
-        async_log_print(f"[알림] {detector_ip} 업그레이드 명령을 성공적으로 마쳤습니다. 사용된 파일: {file_name}")
+        async_log_print(f"[알림] {detector_ip} 업그레이드 명령을 성공적으로 마쳤습니다. 사용된 파일: {fixed_name}")
     else:
         async_log_print(f"[알림] {detector_ip} 업그레이드 명령 중 오류가 발생했습니다.")
 
